@@ -19,7 +19,6 @@
     .diag { font-size: 12px; color: #555; margin-top: 4px; }
     progress { width: 60%; height: 12px; }
     .ok { color: #137333; }
-    .warn { color: #b45309; }
     .err { color: #b00020; }
     .muted { color: #777; }
   </style>
@@ -42,6 +41,7 @@
     <div class="row">
       <input type="file" id="mappingFile" accept=".xlsx,.xls,.csv" />
       <button id="removeFileBtn" type="button" disabled>Remove Uploaded File</button>
+      <button id="downloadTemplateBtn" type="button">Download CSV Template</button>
     </div>
     <div id="mapStatus" class="diag muted">No uploaded file yet.</div>
 
@@ -74,6 +74,7 @@
     // UI refs
     const mappingFileEl = document.getElementById('mappingFile');
     const removeFileBtn = document.getElementById('removeFileBtn');
+    const downloadTemplateBtn = document.getElementById('downloadTemplateBtn');
     const mapStatusEl   = document.getElementById('mapStatus');
     const partnerIdEl   = document.getElementById('partnerId');
     const genSingleBtn  = document.getElementById('genSingleBtn');
@@ -101,8 +102,8 @@
     }
 
     function updateButtonsState() {
-      genSingleBtn.disabled = false;
-      genBulkBtn.disabled = Object.keys(UPLOADED_MAP).length === 0;
+      genSingleBtn.disabled = false; // single gen always available
+      genBulkBtn.disabled = Object.keys(UPLOADED_MAP).length === 0; // bulk only if upload present
       removeFileBtn.disabled = Object.keys(UPLOADED_MAP).length === 0;
       partnerIdEl.placeholder = Object.keys(UPLOADED_MAP).length
         ? "Optional (only for single generation)"
@@ -127,7 +128,7 @@
       } catch { return false; }
     }
 
-    // ---- File upload ----
+    // --- Robust CSV/Excel upload (replaces previous upload) ---
     mappingFileEl.addEventListener('change', async (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
@@ -142,12 +143,13 @@
           const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(l => l.trim().length);
           if (!lines.length) throw new Error("CSV appears empty");
 
-          // detect delimiter
+          // detect delimiter , vs ;
           const sample = lines.slice(0, Math.min(lines.length, 3)).join('\n');
           const commaCount = (sample.match(/,/g) || []).length;
           const semiCount  = (sample.match(/;/g) || []).length;
           const delim = semiCount > commaCount ? ';' : ',';
 
+          // basic splitter supporting quotes
           const splitRow = (row) => {
             const out = [];
             let cur = '', inQ = false;
@@ -168,178 +170,17 @@
             headerCells.includes('storename') || headerCells.includes('store_name') || headerCells.includes('store');
 
           const dataLines = looksHeadered ? lines.slice(1) : lines;
+
           for (const row of dataLines) {
             const cells = splitRow(row);
             if (cells.length < 2) continue;
             let idCell, nameCell;
             if (looksHeadered) {
-              const idxId = headerCells.indexOf('partner_id') !== -1 ? headerCells.indexOf('partner_id') :
-                            headerCells.indexOf('partnerid')  !== -1 ? headerCells.indexOf('partnerid')  :
-                            headerCells.indexOf('id');
-              const idxName = headerCells.indexOf('store_name') !== -1 ? headerCells.indexOf('store_name') :
-                              headerCells.indexOf('storename')  !== -1 ? headerCells.indexOf('storename')  :
-                              headerCells.indexOf('store');
-              if (idxId === -1 || idxName === -1) continue;
-              idCell   = cells[idxId] ?? '';
-              nameCell = cells[idxName] ?? '';
-            } else {
-              idCell   = cells[0];
-              nameCell = cells[1];
-            }
-            const id   = normalizeId(idCell);
-            const name = (nameCell || "").toString().trim();
-            if (id && name) rows.push([id, name]);
-          }
-        } else {
-          // Excel
-          const buf = new Uint8Array(await file.arrayBuffer());
-          const wb = XLSX.read(buf, { type: 'array' });
-          const ws = wb.Sheets[wb.SheetNames[0]];
-          const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
-          json.forEach(obj => {
-            const norm = {};
-            Object.keys(obj).forEach(k => norm[normalizeHeader(k)] = obj[k]);
-            const id   = normalizeId(norm.partner_id || norm.partnerid || norm.id);
-            const name = (norm.store_name || norm.storename || norm.store || "").toString().trim();
-            if (id && name) rows.push([id, name]);
-          });
-        }
-
-        // Replace uploaded map
-        UPLOADED_MAP = {};
-        rows.forEach(([id, name]) => UPLOADED_MAP[id] = name);
-
-        if (rows.length === 0) {
-          mapStatusEl.className = "diag err";
-          mapStatusEl.textContent =
-            `No valid rows found in "${uploadedFilename}".\nExpected headers partner_id,store_name OR first two columns.`;
-        } else {
-          mapStatusEl.className = "diag ok";
-          mapStatusEl.textContent = `Uploaded "${uploadedFilename}": ${rows.length} row(s) loaded.`;
-        }
-        statusEl.textContent = rows.length ? "Uploaded mapping ready." : "Upload parsed with 0 rows.";
-      } catch (err) {
-        mapStatusEl.className = "diag err";
-        mapStatusEl.textContent = `Error reading "${uploadedFilename}": ${err.message}`;
-      }
-
-      rebuildActiveMap();
-    });
-
-    removeFileBtn.addEventListener('click', () => {
-      UPLOADED_MAP = {};
-      uploadedFilename = "";
-      mappingFileEl.value = "";
-      statusEl.textContent = "Uploaded mapping cleared. Using Site CSV only.";
-      rebuildActiveMap();
-    });
-
-    // ---- Init ----
-    document.addEventListener('DOMContentLoaded', async () => {
-      const ok = await loadSiteCsv();
-      statusEl.textContent = ok ? "Ready." : "Site CSV not found or empty. You can still upload a file.";
-      rebuildActiveMap();
-      genSingleBtn.disabled = false;
-    });
-
-    // ---- Drawing logic ----
-    async function drawCreative(partnerIdRaw) {
-      const partnerId = normalizeId(partnerIdRaw);
-      const storeName = ACTIVE_MAP[partnerId] || "";
-      const baseImg = await loadImage(baseImagePath);
-      const canvas = document.getElementById('canvas');
-      const ctx = canvas.getContext('2d');
-      canvas.width = baseImg.width;
-      canvas.height = baseImg.height;
-      ctx.drawImage(baseImg, 0, 0);
-
-      // QR
-      const waUrl = `https://wa.me/917000070000?text=MyJio%20${encodeURIComponent(partnerIdRaw.toString().trim())}`;
-      const qrCanvas = document.createElement('canvas');
-      await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
-
-      const qrPx = Math.floor(canvas.width * 0.15);
-      const rightMargin  = Math.floor(canvas.width * 0.02);
-      const bottomMargin = Math.floor(canvas.width * 0.02);
-      const x = canvas.width - qrPx - rightMargin;
-      const y = canvas.height - qrPx - bottomMargin;
-      ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
-
-      const label = storeName ? `${partnerId} | ${storeName}` : `${partnerId}`;
-      let fontSize = Math.max(10, Math.floor(canvas.width * 0.03)) + 1;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      ctx.fillStyle = "#000";
-      ctx.strokeStyle = "rgba(255,255,255,0.9)";
-      const maxWidth = qrPx * 0.95;
-      const measure = (px) => { ctx.font = `${px}px Arial, sans-serif`; return ctx.measureText(label).width; };
-      let textWidth = measure(fontSize);
-      while (textWidth > maxWidth && fontSize > 8) {
-        fontSize -= 1;
-        textWidth = measure(fontSize);
-      }
-      const paddingAboveQR = Math.floor(qrPx * 0.14);
-      const textX = x + (qrPx / 2);
-      let textY = y - paddingAboveQR - fontSize;
-      if (textY < 4) textY = 4;
-      ctx.lineWidth = Math.max(2, Math.floor(fontSize * 0.12));
-      ctx.strokeText(label, textX, textY);
-      ctx.fillText(label, textX, textY);
-
-      return new Promise((resolve) => {
-        canvas.toBlob((blob) => resolve(blob), "image/png");
-      });
-    }
-
-    genSingleBtn.addEventListener('click', async () => {
-      const rawId = partnerIdEl.value;
-      if (!rawId || !rawId.trim()) {
-        alert("Please enter Partner ID for single generation.");
-        return;
-      }
-      statusEl.textContent = "Generating…";
-      const blob = await drawCreative(rawId.trim());
-      const partnerId = normalizeId(rawId);
-      saveAs(blob, `creative_${partnerId}.png`);
-      statusEl.textContent = "Done.";
-    });
-
-    genBulkBtn.addEventListener('click', async () => {
-      const ids = Object.keys(UPLOADED_MAP);
-      if (!ids.length) {
-        alert("Please upload an Excel/CSV first for bulk.");
-        return;
-      }
-      statusEl.textContent = `Generating ${ids.length} creatives…`;
-      bulkProgress.style.display = "inline-block";
-      bulkProgress.value = 0;
-      bulkProgress.max = ids.length;
-      const zip = new JSZip();
-      for (let i = 0; i < ids.length; i++) {
-        const pid = ids[i];
-        const blob = await drawCreative(pid);
-        const safeName = pid.replace(/[^a-z0-9_\-]+/gi, "_").slice(0, 60);
-        zip.file(`creative_${safeName}.png`, blob);
-        bulkProgress.value = i + 1;
-        statusEl.textContent = `Generating ${i + 1}/${ids.length}…`;
-      }
-      statusEl.textContent = "Zipping files…";
-      const zipBlob = await zip.generateAsync({ type: "blob" });
-      const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
-      saveAs(zipBlob, `creatives_${stamp}.zip`);
-      statusEl.textContent = "Bulk ZIP ready.";
-      bulkProgress.style.display = "none";
-    });
-
-    function loadImage(src) {
-      return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.crossOrigin = "anonymous";
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = src + (src.includes("?") ? "&" : "?") + "v=" + Date.now();
-      });
-    }
-  </script>
-</body>
-</html>
+              const idxId =
+                headerCells.indexOf('partner_id') !== -1 ? headerCells.indexOf('partner_id') :
+                headerCells.indexOf('partnerid')  !== -1 ? headerCells.indexOf('partnerid')  :
+                headerCells.indexOf('id');
+              const idxName =
+                headerCells.indexOf('store_name') !== -1 ? headerCells.indexOf('store_name') :
+                headerCells.indexOf('storename')  !== -1 ? headerCells.indexOf('storename')  :
+                headerCells.indexOf('store');
