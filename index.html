@@ -92,7 +92,7 @@
       const storeName = PARTNER_MAP[normalizedId] || "";
       const label = storeName ? `${normalizedId} | ${storeName}` : `${normalizedId}`;
 
-      let fontSize = Math.max(10, Math.floor(canvas.width * 0.03)) + 1; // ↑ slightly bigger text
+      let fontSize = Math.max(10, Math.floor(canvas.width * 0.05)) + 1; // ↑ slightly bigger text
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
       ctx.fillStyle = "#000";
@@ -138,5 +138,6 @@
   </script>
 </body>
 </html>
+
 
 
