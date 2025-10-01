@@ -13,10 +13,15 @@
     button[disabled] { opacity: 0.6; cursor: not-allowed; }
     button:hover:not([disabled]) { background: #005fcc; }
     .hint { font-size: 14px; color: #666; }
-    .status { font-size: 13px; color: #666; margin-top: 6px; min-height: 1.2em; }
+    .status { font-size: 13px; color: #444; margin-top: 6px; min-height: 1.2em; white-space: pre-line; }
+    .ok { color: #137333; }
     .warn { color: #b45309; }
+    .err { color: #b00020; }
+    .diag { font-size: 12px; color: #555; margin-top: 6px; }
   </style>
+  <!-- QR generator -->
   <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+  <!-- CSV parser (Papa Parse) -->
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 </head>
 <body>
@@ -26,6 +31,7 @@
     <input type="text" id="partnerId" placeholder="Enter Partner ID" />
     <button id="genBtn" disabled>Generate Creative</button>
     <div id="status" class="status">Loading partner mapping…</div>
+    <div id="diag" class="diag"></div>
     <canvas id="canvas"></canvas><br />
     <button id="downloadBtn" style="display:none;">⬇ Download Creative</button>
   </div>
@@ -35,59 +41,108 @@
     const partnerCsvUrl  = "partners.csv";
 
     let PARTNER_MAP = {};
-    let partnersReady = null;
+    const diagEl = document.getElementById('diag');
+    const statusEl = document.getElementById('status');
+    const genBtn = document.getElementById('genBtn');
+    const dlBtn  = document.getElementById('downloadBtn');
 
-    // Normalize CSV headers like "Partner Id", "partner_id", "PARTNERID" -> "partnerid"
     const normalizeHeader = (h) => (h || "").toString().replace(/[^a-z0-9]/gi, "").toLowerCase();
     const normalizeId = (id) => (id || "").toString().trim().toUpperCase();
 
-    function loadPartners() {
-      if (partnersReady) return partnersReady;
-      partnersReady = new Promise((resolve) => {
-        fetch(partnerCsvUrl + "?v=" + Date.now(), { cache: "no-store" })
-          .then(res => res.ok ? res.text() : "")
-          .then(csvText => {
-            if (!csvText) { resolve(false); return; }
-            const result = Papa.parse(csvText, {
-              header: true,
-              skipEmptyLines: true,
-              transformHeader: normalizeHeader
-            });
-            (result.data || []).forEach(row => {
-              // accept common variants for headers
-              const id = normalizeId(row.partner_id || row.partnerid || row.id);
-              const name = (row.store_name || row.storename || row.store || "").trim();
-              if (id && name) PARTNER_MAP[id] = name;
-            });
-            resolve(true);
-          })
-          .catch(() => resolve(false));
-      });
-      return partnersReady;
+    function logDiag(msg, cls="") {
+      const line = document.createElement('div');
+      if (cls) line.className = cls;
+      line.textContent = msg;
+      diagEl.appendChild(line);
     }
 
-    // A small timeout guard so the UI never "hangs"
-    async function loadPartnersWithTimeout(ms = 5000) {
-      return await Promise.race([
-        loadPartners(),
-        new Promise(res => setTimeout(() => res(false), ms))
-      ]);
+    // Fallback minimal CSV parser (comma-separated, handles quotes)
+    function parseCsvFallback(text) {
+      const rows = [];
+      let cur = '', row = [], inQuotes = false;
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i], n = text[i+1];
+        if (c === '"' && n === '"') { cur += '"'; i++; continue; }
+        if (c === '"') { inQuotes = !inQuotes; continue; }
+        if (!inQuotes && (c === ',')) { row.push(cur); cur = ''; continue; }
+        if (!inQuotes && (c === '\n' || c === '\r')) {
+          if (c === '\r' && n === '\n') i++;
+          row.push(cur); rows.push(row); cur = ''; row = []; continue;
+        }
+        cur += c;
+      }
+      if (cur.length || row.length) { row.push(cur); rows.push(row); }
+      return rows;
     }
 
-    const genBtn = document.getElementById('genBtn');
-    const dlBtn  = document.getElementById('downloadBtn');
-    const status = document.getElementById('status');
+    async function loadPartners() {
+      try {
+        const url = partnerCsvUrl + "?v=" + Date.now(); // cache-bust
+        logDiag("Fetching CSV: " + url);
+        const res = await fetch(url, { cache: "no-store" });
+        logDiag(`Fetch status: ${res.status}`, res.ok ? "ok" : "warn");
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const text = await res.text();
+        if (!text.trim()) throw new Error("CSV is empty");
 
-    document.addEventListener('DOMContentLoaded', init);
-    async function init() {
-      const ok = await loadPartnersWithTimeout(5000);
-      status.textContent = ok
+        // Try Papa first
+        try {
+          const papa = Papa.parse(text, {
+            header: true,
+            skipEmptyLines: true,
+            transformHeader: normalizeHeader
+          });
+          if (papa.errors && papa.errors.length) {
+            logDiag("Papa warnings: " + papa.errors.length, "warn");
+          }
+          const data = papa.data || [];
+          let count = 0;
+          data.forEach(row => {
+            const id = normalizeId(row.partner_id || row.partnerid || row.id);
+            const name = (row.store_name || row.storename || row.store || "").trim();
+            if (id && name) { PARTNER_MAP[id] = name; count++; }
+          });
+          logDiag(`Papa parsed rows: ${data.length} | mapped: ${count}`, "ok");
+          return count > 0;
+        } catch (e) {
+          logDiag("Papa parse failed, using fallback: " + e.message, "warn");
+          // Fallback
+          const rows = parseCsvFallback(text);
+          if (!rows.length) throw new Error("No rows after fallback parse");
+          const headers = rows.shift().map(normalizeHeader);
+          const idxId = headers.findIndex(h => ['partner_id','partnerid','id'].includes(h));
+          const idxName = headers.findIndex(h => ['store_name','storename','store'].includes(h));
+          if (idxId === -1 || idxName === -1) throw new Error("Headers missing (need partner_id + store_name)");
+          let count = 0;
+          rows.forEach(r => {
+            const id = normalizeId(r[idxId]);
+            const name = (r[idxName] || "").toString().trim();
+            if (id && name) { PARTNER_MAP[id] = name; count++; }
+          });
+          logDiag(`Fallback parsed rows: ${rows.length} | mapped: ${count}`, "ok");
+          return count > 0;
+        }
+      } catch (err) {
+        logDiag("CSV load error: " + err.message, "err");
+        return false;
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      let ok = false;
+      try {
+        ok = await Promise.race([
+          loadPartners(),
+          new Promise(res => setTimeout(() => res(false), 7000))
+        ]);
+      } catch {}
+      statusEl.textContent = ok
         ? "Mapping loaded. You can generate now."
-        : "Mapping couldn't be loaded. You'll still be able to generate (label will show Partner ID only if no match).";
-      genBtn.disabled = false; // always enable, even if CSV failed
-    }
+        : "Mapping couldn't be loaded. You can still generate (label will show Partner ID only if no match).";
+      genBtn.disabled = false;
+    });
 
-    genBtn.addEventListener('click', () => generateCreative().catch(console.error));
+    genBtn.addEventListener('click', () => generateCreative().catch(e => logDiag("Generate error: " + e.message, "err")));
     dlBtn.addEventListener('click', downloadCreative);
 
     async function generateCreative() {
@@ -98,10 +153,10 @@
       }
       const normalizedId = normalizeId(rawId);
 
-      // Ensure mapping tried at least once
-      await loadPartnersWithTimeout(1);
+      // Ensure we attempted loading at least once (no await to avoid re-hang)
+      loadPartners();
 
-      // Load base creative
+      // Load base
       const baseImg = await loadImage(baseImagePath);
       const canvas = document.getElementById('canvas');
       const ctx = canvas.getContext('2d');
@@ -109,27 +164,23 @@
       canvas.height = baseImg.height;
       ctx.drawImage(baseImg, 0, 0);
 
-      // Build QR URL
+      // QR
       const waUrl = `https://wa.me/917000070000?text=MyJio%20${encodeURIComponent(rawId.trim())}`;
-
-      // Generate QR at good native resolution
       const qrCanvas = document.createElement('canvas');
       await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
 
-      // --- Placement ---
-      // QR size ~15% of width; bottom/right margin ~5% (QR slightly lower)
+      // Placement (QR a bit lower: margin 5% of width)
       const qrPx = Math.floor(canvas.width * 0.15);
       const marginPx = Math.floor(canvas.width * 0.05);
       const x = canvas.width - qrPx - marginPx;
       const y = canvas.height - qrPx - marginPx;
       ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
 
-      // --- Single-line label ABOVE QR: "PartnerID | Store Name" ---
+      // Label above QR (single line, shrink to fit)
       const storeName = PARTNER_MAP[normalizedId] || "";
       const label = storeName ? `${normalizedId} | ${storeName}` : `${normalizedId}`;
 
-      // Start smaller; shrink to fit within QR width (no wrapping)
-      let fontSize = Math.max(10, Math.floor(canvas.width * 0.018)); // ~1.8% of width
+      let fontSize = Math.max(10, Math.floor(canvas.width * 0.018));
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
       ctx.fillStyle = "#000";
@@ -143,34 +194,27 @@
         textWidth = measure(fontSize);
       }
 
-      // place fully above QR with some extra padding to avoid overlapping base box
-      const paddingAboveQR = Math.floor(qrPx * 0.14);  // a bit more than before
+      const paddingAboveQR = Math.floor(qrPx * 0.14);
       const textX = x + (qrPx / 2);
-      let textY = y - paddingAboveQR - fontSize;       // top-baseline: move up by fontSize
-
-      // keep inside canvas
+      let textY = y - paddingAboveQR - fontSize;
       if (textY < 4) textY = 4;
 
       ctx.lineWidth = Math.max(2, Math.floor(fontSize * 0.12));
       ctx.strokeText(label, textX, textY);
       ctx.fillText(label, textX, textY);
 
-      // UI
       dlBtn.style.display = "inline-block";
-      if (!storeName) {
-        status.innerHTML = "<span class='warn'>Partner ID not found in CSV. Showing Partner ID only.</span>";
-      } else {
-        status.textContent = "";
-      }
+      if (!storeName) statusEl.innerHTML = "Partner ID not found in CSV. Showing Partner ID only.";
+      else statusEl.textContent = "";
     }
 
     function loadImage(src) {
       return new Promise((resolve, reject) => {
         const img = new Image();
-        img.crossOrigin = "anonymous"; // works on GitHub Pages
+        img.crossOrigin = "anonymous";
         img.onload = () => resolve(img);
-        img.onerror = (e) => reject(new Error("Failed to load base image: " + src));
-        img.src = src + (src.includes("?") ? "&" : "?") + "v=" + Date.now(); // cache-bust
+        img.onerror = () => reject(new Error("Failed to load base image: " + src));
+        img.src = src + (src.includes("?") ? "&" : "?") + "v=" + Date.now();
       });
     }
 
