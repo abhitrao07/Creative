@@ -8,57 +8,165 @@
     body { font-family: Arial, sans-serif; margin: 30px; text-align: center; }
     .container { max-width: 720px; margin: auto; }
     canvas { border: 1px solid #ccc; margin-top: 20px; max-width: 100%; }
-    input, button { margin: 10px 0; padding: 10px; font-size: 16px; width: 80%; }
+    .row { display: flex; gap: 12px; justify-content: center; align-items: center; flex-wrap: wrap; }
+    input[type="text"], input[type="file"], button { margin: 10px 0; padding: 10px; font-size: 16px; }
+    input[type="text"] { width: 80%; }
     button { cursor: pointer; background: #0078ff; color: white; border: none; border-radius: 6px; }
     button[disabled] { opacity: 0.6; cursor: not-allowed; }
     button:hover:not([disabled]) { background: #005fcc; }
     .hint { font-size: 14px; color: #666; }
     .status { font-size: 13px; color: #444; margin-top: 6px; min-height: 1.2em; white-space: pre-line; }
+    .diag { font-size: 12px; color: #555; margin-top: 4px; }
   </style>
+  <!-- QR generator -->
   <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+  <!-- CSV parser -->
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <!-- Excel parser (SheetJS) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 </head>
 <body>
   <div class="container">
     <h2>Generate Your Jio Creative</h2>
-    <p class="hint">Enter Partner ID and click Generate</p>
+    <p class="hint">Option A: upload Excel/CSV mapping (optional). Option B: just enter Partner ID.</p>
+
+    <!-- New: Excel/CSV upload -->
+    <div class="row">
+      <input type="file" id="excelFile" accept=".xlsx,.xls,.csv" />
+      <button id="clearMapBtn" type="button">Clear Uploaded Mapping</button>
+    </div>
+    <div id="mapStatus" class="diag"></div>
+
+    <!-- Existing single-entry flow -->
     <input type="text" id="partnerId" placeholder="Enter Partner ID" />
-    <button id="genBtn" disabled>Generate Creative</button>
+    <div class="row">
+      <button id="genBtn" disabled>Generate Creative</button>
+      <button id="downloadBtn" style="display:none;">⬇ Download Creative</button>
+    </div>
+
     <div id="status" class="status">Loading partner mapping…</div>
-    <canvas id="canvas"></canvas><br />
-    <button id="downloadBtn" style="display:none;">⬇ Download Creative</button>
+    <canvas id="canvas"></canvas>
   </div>
 
   <script>
     const baseImagePath = "base.jpg";
     const partnerCsvUrl  = "partners.csv";
 
-    let PARTNER_MAP = {};
+    // ---- Mapping store ----
+    let PARTNER_MAP = {};           // active map (site + uploaded)
+    let LOADED_SITE_ROWS = 0;       // rows from partners.csv
+    let LOADED_UPLOAD_ROWS = 0;     // rows from user-uploaded file
+
+    // ---- Utils ----
     const normalizeHeader = (h) => (h || "").toString().replace(/[^a-z0-9]/gi, "").toLowerCase();
     const normalizeId = (id) => (id || "").toString().trim().toUpperCase();
 
-    async function loadPartners() {
+    function mergeIntoMap(rows) {
+      // rows: array of { partner_id, store_name } (already normalized id)
+      let added = 0;
+      rows.forEach(({ id, name }) => {
+        if (id && name) {
+          PARTNER_MAP[id] = name;
+          added++;
+        }
+      });
+      return added;
+    }
+
+    // ---- Load site CSV on start (same as before) ----
+    async function loadPartnersFromSiteCsv() {
       try {
         const res = await fetch(partnerCsvUrl + "?v=" + Date.now(), { cache: "no-store" });
         if (!res.ok) return false;
         const text = await res.text();
         if (!text.trim()) return false;
+
         const papa = Papa.parse(text, { header: true, skipEmptyLines: true, transformHeader: normalizeHeader });
+        const rows = [];
         (papa.data || []).forEach(row => {
-          const id = normalizeId(row.partner_id || row.partnerid || row.id);
-          const name = (row.store_name || row.storename || row.store || "").trim();
-          if (id && name) PARTNER_MAP[id] = name;
+          const id   = normalizeId(row.partner_id || row.partnerid || row.id);
+          const name = (row.store_name || row.storename || row.store || "").toString().trim();
+          if (id && name) rows.push({ id, name });
         });
+        LOADED_SITE_ROWS = mergeIntoMap(rows);
         return true;
-      } catch { return false; }
+      } catch {
+        return false;
+      }
     }
 
+    // ---- Handle uploads (.xlsx / .xls / .csv) ----
+    document.getElementById('excelFile').addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+
+      try {
+        if (file.name.toLowerCase().endsWith('.csv')) {
+          // CSV path via Papa
+          const text = await file.text();
+          const papa = Papa.parse(text, { header: true, skipEmptyLines: true, transformHeader: normalizeHeader });
+          const rows = [];
+          (papa.data || []).forEach(row => {
+            const id   = normalizeId(row.partner_id || row.partnerid || row.id);
+            const name = (row.store_name || row.storename || row.store || "").toString().trim();
+            if (id && name) rows.push({ id, name });
+          });
+          const added = mergeIntoMap(rows);
+          LOADED_UPLOAD_ROWS += added;
+          updateMapStatus(`Uploaded CSV: ${added} rows merged.`);
+        } else {
+          // Excel path via SheetJS
+          const data = new Uint8Array(await file.arrayBuffer());
+          const wb = XLSX.read(data, { type: 'array' });
+          // Pick the first sheet
+          const sheetName = wb.SheetNames[0];
+          const ws = wb.Sheets[sheetName];
+          // Convert to JSON with raw headers, then normalize
+          const raw = XLSX.utils.sheet_to_json(ws, { defval: "" }); // array of objects
+          const rows = [];
+          raw.forEach(obj => {
+            // Normalize headers
+            const norm = {};
+            Object.keys(obj).forEach(k => norm[normalizeHeader(k)] = obj[k]);
+            const id   = normalizeId(norm.partner_id || norm.partnerid || norm.id);
+            const name = (norm.store_name || norm.storename || norm.store || "").toString().trim();
+            if (id && name) rows.push({ id, name });
+          });
+          const added = mergeIntoMap(rows);
+          LOADED_UPLOAD_ROWS += added;
+          updateMapStatus(`Uploaded Excel: ${added} rows merged from "${sheetName}".`);
+        }
+      } catch (err) {
+        updateMapStatus(`Upload parse error: ${err.message}`);
+      }
+    });
+
+    // Clear uploaded mapping (keeps site CSV)
+    document.getElementById('clearMapBtn').addEventListener('click', async () => {
+      PARTNER_MAP = {};
+      LOADED_UPLOAD_ROWS = 0;
+      await loadPartnersFromSiteCsv(); // reload site CSV
+      updateMapStatus(`Cleared uploaded mapping. Site CSV rows active: ${LOADED_SITE_ROWS}.`);
+    });
+
+    function updateMapStatus(extraMsg = "") {
+      const el = document.getElementById('mapStatus');
+      el.textContent =
+        `Active IDs in memory: ${Object.keys(PARTNER_MAP).length} ` +
+        `| Site CSV: ${LOADED_SITE_ROWS}` +
+        (LOADED_UPLOAD_ROWS ? ` | Uploaded: ${LOADED_UPLOAD_ROWS}` : "") +
+        (extraMsg ? `\n${extraMsg}` : "");
+    }
+
+    // ---- Init ----
     document.addEventListener('DOMContentLoaded', async () => {
-      await loadPartners();
-      document.getElementById('status').textContent = "Ready. Enter Partner ID.";
+      await loadPartnersFromSiteCsv();
+      updateMapStatus(`Site CSV loaded${LOADED_SITE_ROWS ? `: ${LOADED_SITE_ROWS} rows.` : "."}`);
+      document.getElementById('status').textContent = "Ready. Enter Partner ID or upload mapping.";
       document.getElementById('genBtn').disabled = false;
     });
 
+    // ---- Generate (same visual logic you had) ----
     document.getElementById('genBtn').addEventListener('click', generateCreative);
     document.getElementById('downloadBtn').addEventListener('click', downloadCreative);
 
@@ -70,6 +178,7 @@
       }
       const normalizedId = normalizeId(rawId);
 
+      // Base image
       const baseImg = await loadImage(baseImagePath);
       const canvas = document.getElementById('canvas');
       const ctx = canvas.getContext('2d');
@@ -83,16 +192,19 @@
       await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
 
       const qrPx = Math.floor(canvas.width * 0.15);
-      const marginPx = Math.floor(canvas.width * 0.02); // ↑ slightly bigger = lower QR
-      const x = canvas.width - qrPx - marginPx;
-      const y = canvas.height - qrPx - marginPx;
+      // keep your current compact margins (edit these two numbers to fine-tune independently)
+      const rightMargin  = Math.floor(canvas.width * 0.02);
+      const bottomMargin = Math.floor(canvas.width * 0.02);
+
+      const x = canvas.width - qrPx - rightMargin;
+      const y = canvas.height - qrPx - bottomMargin;
       ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
 
-      // Label above QR
+      // Label above QR (single line, auto-shrink)
       const storeName = PARTNER_MAP[normalizedId] || "";
       const label = storeName ? `${normalizedId} | ${storeName}` : `${normalizedId}`;
 
-      let fontSize = Math.max(10, Math.floor(canvas.width * 0.05)) + 1; // ↑ slightly bigger text
+      let fontSize = Math.max(10, Math.floor(canvas.width * 0.03)) + 1; // your latest setting
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
       ctx.fillStyle = "#000";
@@ -116,6 +228,8 @@
       ctx.fillText(label, textX, textY);
 
       document.getElementById('downloadBtn').style.display = "inline-block";
+      document.getElementById('status').textContent =
+        storeName ? "" : "Partner ID not found in mapping. Showing Partner ID only.";
     }
 
     function loadImage(src) {
@@ -138,6 +252,3 @@
   </script>
 </body>
 </html>
-
-
-
