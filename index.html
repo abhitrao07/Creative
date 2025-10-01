@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Jio Partner Creative Generator</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 30px; text-align: center; }
+    .container { max-width: 600px; margin: auto; }
+    canvas { border: 1px solid #ccc; margin-top: 20px; max-width: 100%; }
+    input, button { margin: 10px 0; padding: 10px; font-size: 16px; width: 80%; }
+    button { cursor: pointer; background: #0078ff; color: white; border: none; border-radius: 6px; }
+    button:hover { background: #005fcc; }
+  </style>
+  <!-- QR generator -->
+  <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h2>Generate Your Jio Creative</h2>
+    <input type="text" id="partnerId" placeholder="Enter Partner ID"><br>
+    <button onclick="generateCreative()">Generate Creative</button>
+    <canvas id="canvas"></canvas><br>
+    <button id="downloadBtn" style="display:none;" onclick="downloadCreative()">⬇ Download Creative</button>
+  </div>
+
+  <script>
+    const baseImagePath = "base.jpg";  // <-- Replace with hosted URL of your static creative
+
+    async function generateCreative() {
+      const partnerId = document.getElementById('partnerId').value.trim();
+      if (!partnerId) {
+        alert("Please enter Partner ID");
+        return;
+      }
+
+      // Load base creative (static)
+      const baseImg = await loadImage(baseImagePath);
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = baseImg.width;
+      canvas.height = baseImg.height;
+      ctx.drawImage(baseImg, 0, 0);
+
+      // Generate QR
+      const waUrl = `https://wa.me/917000070000?text=MyJio%20${encodeURIComponent(partnerId)}`;
+      const qrCanvas = document.createElement('canvas');
+      await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 }); // generate 400px sharp QR
+
+      // Place QR (bottom-right corner)
+      const qrPx = Math.floor(canvas.width * 0.15);   // 15% of width
+      const marginPx = Math.floor(canvas.width * 0.03); // 3% margin
+
+      const x = canvas.width - qrPx - marginPx;
+      const y = canvas.height - qrPx - marginPx;
+
+      ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
+
+      // Show download button
+      document.getElementById('downloadBtn').style.display = "inline-block";
+    }
+
+    function loadImage(src) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous"; // important if hosted externally
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = src;
+      });
+    }
+
+    function downloadCreative() {
+      const canvas = document.getElementById('canvas');
+      const link = document.createElement('a');
+      link.download = "final_creative.png";
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+    }
+  </script>
+</body>
+</html>
