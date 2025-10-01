@@ -14,7 +14,7 @@
     button:hover:not([disabled]) { background: #005fcc; }
     .hint { font-size: 14px; color: #666; }
     .status { font-size: 13px; color: #666; margin-top: 6px; }
-    .warn { color: #b45309; } /* amber */
+    .warn { color: #b45309; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
@@ -31,14 +31,13 @@
   </div>
 
   <script>
-    // ---- CONFIG ----
     const baseImagePath = "base.jpg";
     const partnerCsvUrl  = "partners.csv";
 
     let PARTNER_MAP = {};
     let partnersReady = null;
 
-    // Load CSV and resolve when ready
+    // Load CSV mapping
     function loadPartners() {
       if (partnersReady) return partnersReady;
       partnersReady = new Promise((resolve) => {
@@ -64,21 +63,18 @@
     }
 
     function normalizeId(id) {
-      return (id || "").toString().trim().toUpperCase(); // keep numbers as strings; preserve leading zeros
+      return (id || "").toString().trim().toUpperCase();
     }
 
-    // init
     const genBtn = document.getElementById('genBtn');
     const dlBtn  = document.getElementById('downloadBtn');
     const status = document.getElementById('status');
 
     (async () => {
       const ok = await loadPartners();
-      if (ok) {
-        status.textContent = "Mapping loaded. You can generate now.";
-      } else {
-        status.innerHTML = "<span class='warn'>Mapping couldn't be loaded. Creatives will show Partner ID only.</span>";
-      }
+      status.textContent = ok
+        ? "Mapping loaded. You can generate now."
+        : "Mapping could not be loaded. Creatives will only show Partner ID.";
       genBtn.disabled = false;
     })();
 
@@ -93,7 +89,6 @@
       }
       const normalizedId = normalizeId(rawId);
 
-      // Ensure mapping has finished loading (in case user clicks early)
       await loadPartners();
 
       // Load base creative
@@ -111,7 +106,7 @@
       const qrCanvas = document.createElement('canvas');
       await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
 
-      // Relative size/placement
+      // Placement
       const qrPx = Math.floor(canvas.width * 0.15);
       const marginPx = Math.floor(canvas.width * 0.03);
       const x = canvas.width - qrPx - marginPx;
@@ -119,10 +114,11 @@
 
       ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
 
-      // Label
-      const storeName = PARTNER_MAP[normalizedId] || "";
-      const label = storeName ? `${normalizedId} | ${storeName}` : `${normalizedId}`;
+      // ---- Show Store Name only ----
+      const storeName = PARTNER_MAP[normalizedId] || "Store Not Found";
+      const label = storeName;
 
+      // Fit text under QR
       let fontSize = Math.max(12, Math.floor(canvas.width * 0.028));
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
@@ -141,8 +137,8 @@
       let textX = x + (qrPx / 2);
       let textY = y + qrPx + paddingBelowQR;
 
-      const minBottomPadding = fontSize + 6;
-      const overflow = (textY + minBottomPadding) - canvas.height;
+      // Keep inside canvas
+      const overflow = (textY + fontSize + 6) - canvas.height;
       if (overflow > 0) textY -= overflow;
 
       ctx.lineWidth = Math.max(2, Math.floor(fontSize * 0.12));
@@ -150,10 +146,6 @@
       ctx.fillText(label, textX, textY);
 
       dlBtn.style.display = "inline-block";
-
-      // Show a gentle notice if ID not found
-      if (!storeName) status.innerHTML = "<span class='warn'>ID not found in mapping; showing Partner ID only.</span>";
-      else status.textContent = "";
     }
 
     function loadImage(src) {
