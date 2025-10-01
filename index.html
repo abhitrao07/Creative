@@ -6,17 +6,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     body { font-family: Arial, sans-serif; margin: 30px; text-align: center; }
-    .container { max-width: 720px; margin: auto; }
+    .container { max-width: 900px; margin: auto; }
     canvas { border: 1px solid #ccc; margin-top: 20px; max-width: 100%; }
     .row { display: flex; gap: 12px; justify-content: center; align-items: center; flex-wrap: wrap; }
     input[type="text"], input[type="file"], button { margin: 10px 0; padding: 10px; font-size: 16px; }
-    input[type="text"] { width: 80%; }
+    input[type="text"] { width: 60%; min-width: 260px; }
     button { cursor: pointer; background: #0078ff; color: white; border: none; border-radius: 6px; }
     button[disabled] { opacity: 0.6; cursor: not-allowed; }
     button:hover:not([disabled]) { background: #005fcc; }
     .hint { font-size: 14px; color: #666; }
     .status { font-size: 13px; color: #444; margin-top: 6px; min-height: 1.2em; white-space: pre-line; }
     .diag { font-size: 12px; color: #555; margin-top: 4px; }
+    progress { width: 60%; height: 12px; }
   </style>
   <!-- QR generator -->
   <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
@@ -24,161 +25,178 @@
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
   <!-- Excel parser (SheetJS) -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <!-- Zip (JSZip) + FileSaver -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
 </head>
 <body>
   <div class="container">
     <h2>Generate Your Jio Creative</h2>
-    <p class="hint">Option A: upload Excel/CSV mapping (optional). Option B: just enter Partner ID.</p>
+    <p class="hint">
+      Option A: Upload Excel/CSV (bulk) • Option B: Enter one Partner ID (single)
+    </p>
 
-    <!-- New: Excel/CSV upload -->
+    <!-- Upload mapping -->
     <div class="row">
-      <input type="file" id="excelFile" accept=".xlsx,.xls,.csv" />
-      <button id="clearMapBtn" type="button">Clear Uploaded Mapping</button>
+      <input type="file" id="mappingFile" accept=".xlsx,.xls,.csv" />
+      <button id="removeFileBtn" type="button" disabled>Remove Uploaded File</button>
     </div>
     <div id="mapStatus" class="diag"></div>
 
-    <!-- Existing single-entry flow -->
-    <input type="text" id="partnerId" placeholder="Enter Partner ID" />
+    <!-- Single entry -->
     <div class="row">
-      <button id="genBtn" disabled>Generate Creative</button>
-      <button id="downloadBtn" style="display:none;">⬇ Download Creative</button>
+      <input type="text" id="partnerId" placeholder="Enter Partner ID (single generation)" />
     </div>
 
-    <div id="status" class="status">Loading partner mapping…</div>
+    <!-- Actions -->
+    <div class="row">
+      <button id="genSingleBtn" disabled>Generate Single</button>
+      <button id="genBulkBtn" disabled>Download Bulk ZIP</button>
+      <button id="downloadBtn" style="display:none;">⬇ Download Last Creative</button>
+    </div>
+
+    <div id="status" class="status">Loading default mapping…</div>
+    <progress id="bulkProgress" value="0" max="100" style="display:none;"></progress>
+
     <canvas id="canvas"></canvas>
   </div>
 
   <script>
     const baseImagePath = "base.jpg";
-    const partnerCsvUrl  = "partners.csv";
+    const partnerCsvUrl = "partners.csv";
 
-    // ---- Mapping store ----
-    let PARTNER_MAP = {};           // active map (site + uploaded)
-    let LOADED_SITE_ROWS = 0;       // rows from partners.csv
-    let LOADED_UPLOAD_ROWS = 0;     // rows from user-uploaded file
+    // ---- Maps ----
+    let SITE_MAP = {};       // from partners.csv at page load
+    let UPLOADED_MAP = {};   // from uploaded file (replaces previous upload completely)
+    let ACTIVE_MAP = {};     // SITE_MAP + UPLOADED_MAP (uploaded overrides site)
+    let uploadedFilename = "";
+
+    // ---- UI refs ----
+    const mappingFileEl = document.getElementById('mappingFile');
+    const removeFileBtn = document.getElementById('removeFileBtn');
+    const mapStatusEl   = document.getElementById('mapStatus');
+    const partnerIdEl   = document.getElementById('partnerId');
+    const genSingleBtn  = document.getElementById('genSingleBtn');
+    const genBulkBtn    = document.getElementById('genBulkBtn');
+    const downloadBtn   = document.getElementById('downloadBtn');
+    const statusEl      = document.getElementById('status');
+    const bulkProgress  = document.getElementById('bulkProgress');
 
     // ---- Utils ----
     const normalizeHeader = (h) => (h || "").toString().replace(/[^a-z0-9]/gi, "").toLowerCase();
     const normalizeId = (id) => (id || "").toString().trim().toUpperCase();
 
-    function mergeIntoMap(rows) {
-      // rows: array of { partner_id, store_name } (already normalized id)
-      let added = 0;
-      rows.forEach(({ id, name }) => {
-        if (id && name) {
-          PARTNER_MAP[id] = name;
-          added++;
-        }
-      });
-      return added;
+    function rebuildActiveMap() {
+      ACTIVE_MAP = { ...SITE_MAP, ...UPLOADED_MAP }; // uploaded overrides site
+      updateMapStatus();
+      updateButtonsState();
     }
 
-    // ---- Load site CSV on start (same as before) ----
-    async function loadPartnersFromSiteCsv() {
+    function updateMapStatus(extra="") {
+      const siteCount = Object.keys(SITE_MAP).length;
+      const upCount   = Object.keys(UPLOADED_MAP).length;
+      const actCount  = Object.keys(ACTIVE_MAP).length;
+      mapStatusEl.textContent =
+        `Active IDs: ${actCount} | Site CSV: ${siteCount} | Uploaded: ${upCount}` +
+        (uploadedFilename ? ` | File: ${uploadedFilename}` : "") +
+        (extra ? `\n${extra}` : "");
+    }
+
+    function updateButtonsState() {
+      // Single generation is always possible (with manual ID)
+      genSingleBtn.disabled = false;
+
+      // Bulk is only enabled if uploaded file has IDs
+      genBulkBtn.disabled = Object.keys(UPLOADED_MAP).length === 0;
+
+      // Remove file button enabled only when an upload exists
+      removeFileBtn.disabled = Object.keys(UPLOADED_MAP).length === 0;
+
+      // If an upload exists, single Partner ID field is optional; bulk doesn't need it
+      partnerIdEl.placeholder = Object.keys(UPLOADED_MAP).length
+        ? "Optional (only for single generation)"
+        : "Enter Partner ID (single generation)";
+    }
+
+    async function loadSiteCsv() {
       try {
         const res = await fetch(partnerCsvUrl + "?v=" + Date.now(), { cache: "no-store" });
         if (!res.ok) return false;
         const text = await res.text();
         if (!text.trim()) return false;
-
         const papa = Papa.parse(text, { header: true, skipEmptyLines: true, transformHeader: normalizeHeader });
-        const rows = [];
+        const map = {};
         (papa.data || []).forEach(row => {
           const id   = normalizeId(row.partner_id || row.partnerid || row.id);
           const name = (row.store_name || row.storename || row.store || "").toString().trim();
-          if (id && name) rows.push({ id, name });
+          if (id && name) map[id] = name;
         });
-        LOADED_SITE_ROWS = mergeIntoMap(rows);
+        SITE_MAP = map;
         return true;
-      } catch {
-        return false;
-      }
+      } catch { return false; }
     }
 
-    // ---- Handle uploads (.xlsx / .xls / .csv) ----
-    document.getElementById('excelFile').addEventListener('change', async (e) => {
+    // ---- File upload handling (REPLACE, not merge) ----
+    mappingFileEl.addEventListener('change', async (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
 
+      uploadedFilename = file.name;
       try {
+        let rows = [];
         if (file.name.toLowerCase().endsWith('.csv')) {
-          // CSV path via Papa
           const text = await file.text();
           const papa = Papa.parse(text, { header: true, skipEmptyLines: true, transformHeader: normalizeHeader });
-          const rows = [];
           (papa.data || []).forEach(row => {
             const id   = normalizeId(row.partner_id || row.partnerid || row.id);
             const name = (row.store_name || row.storename || row.store || "").toString().trim();
-            if (id && name) rows.push({ id, name });
+            if (id && name) rows.push([id, name]);
           });
-          const added = mergeIntoMap(rows);
-          LOADED_UPLOAD_ROWS += added;
-          updateMapStatus(`Uploaded CSV: ${added} rows merged.`);
         } else {
-          // Excel path via SheetJS
-          const data = new Uint8Array(await file.arrayBuffer());
-          const wb = XLSX.read(data, { type: 'array' });
-          // Pick the first sheet
-          const sheetName = wb.SheetNames[0];
-          const ws = wb.Sheets[sheetName];
-          // Convert to JSON with raw headers, then normalize
-          const raw = XLSX.utils.sheet_to_json(ws, { defval: "" }); // array of objects
-          const rows = [];
+          const buf = new Uint8Array(await file.arrayBuffer());
+          const wb = XLSX.read(buf, { type: 'array' });
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          const raw = XLSX.utils.sheet_to_json(ws, { defval: "" });
           raw.forEach(obj => {
-            // Normalize headers
             const norm = {};
             Object.keys(obj).forEach(k => norm[normalizeHeader(k)] = obj[k]);
             const id   = normalizeId(norm.partner_id || norm.partnerid || norm.id);
             const name = (norm.store_name || norm.storename || norm.store || "").toString().trim();
-            if (id && name) rows.push({ id, name });
+            if (id && name) rows.push([id, name]);
           });
-          const added = mergeIntoMap(rows);
-          LOADED_UPLOAD_ROWS += added;
-          updateMapStatus(`Uploaded Excel: ${added} rows merged from "${sheetName}".`);
         }
+        // REPLACE uploaded map completely
+        UPLOADED_MAP = {};
+        rows.forEach(([id, name]) => UPLOADED_MAP[id] = name);
+        rebuildActiveMap();
+        statusEl.textContent = "Uploaded mapping ready. You can run Bulk ZIP now.";
       } catch (err) {
-        updateMapStatus(`Upload parse error: ${err.message}`);
+        statusEl.textContent = "Error reading uploaded file: " + err.message;
       }
     });
 
-    // Clear uploaded mapping (keeps site CSV)
-    document.getElementById('clearMapBtn').addEventListener('click', async () => {
-      PARTNER_MAP = {};
-      LOADED_UPLOAD_ROWS = 0;
-      await loadPartnersFromSiteCsv(); // reload site CSV
-      updateMapStatus(`Cleared uploaded mapping. Site CSV rows active: ${LOADED_SITE_ROWS}.`);
+    // Remove uploaded file/mapping
+    removeFileBtn.addEventListener('click', () => {
+      UPLOADED_MAP = {};
+      uploadedFilename = "";
+      mappingFileEl.value = "";
+      rebuildActiveMap();
+      statusEl.textContent = "Uploaded mapping cleared. Using Site CSV only.";
     });
-
-    function updateMapStatus(extraMsg = "") {
-      const el = document.getElementById('mapStatus');
-      el.textContent =
-        `Active IDs in memory: ${Object.keys(PARTNER_MAP).length} ` +
-        `| Site CSV: ${LOADED_SITE_ROWS}` +
-        (LOADED_UPLOAD_ROWS ? ` | Uploaded: ${LOADED_UPLOAD_ROWS}` : "") +
-        (extraMsg ? `\n${extraMsg}` : "");
-    }
 
     // ---- Init ----
     document.addEventListener('DOMContentLoaded', async () => {
-      await loadPartnersFromSiteCsv();
-      updateMapStatus(`Site CSV loaded${LOADED_SITE_ROWS ? `: ${LOADED_SITE_ROWS} rows.` : "."}`);
-      document.getElementById('status').textContent = "Ready. Enter Partner ID or upload mapping.";
-      document.getElementById('genBtn').disabled = false;
+      const ok = await loadSiteCsv();
+      statusEl.textContent = ok ? "Ready." : "Site CSV not found or empty. You can still upload a file.";
+      rebuildActiveMap();
     });
 
-    // ---- Generate (same visual logic you had) ----
-    document.getElementById('genBtn').addEventListener('click', generateCreative);
-    document.getElementById('downloadBtn').addEventListener('click', downloadCreative);
+    // ---- Drawing logic (reused for single & bulk) ----
+    async function drawCreative(partnerIdRaw) {
+      const partnerId = normalizeId(partnerIdRaw);
+      const storeName = ACTIVE_MAP[partnerId] || "";
 
-    async function generateCreative() {
-      const rawId = document.getElementById('partnerId').value;
-      if (!rawId || !rawId.trim()) {
-        alert("Please enter Partner ID");
-        return;
-      }
-      const normalizedId = normalizeId(rawId);
-
-      // Base image
+      // Load base
       const baseImg = await loadImage(baseImagePath);
       const canvas = document.getElementById('canvas');
       const ctx = canvas.getContext('2d');
@@ -187,24 +205,22 @@
       ctx.drawImage(baseImg, 0, 0);
 
       // QR
-      const waUrl = `https://wa.me/917000070000?text=MyJio%20${encodeURIComponent(rawId.trim())}`;
+      const waUrl = `https://wa.me/917000070000?text=MyJio%20${encodeURIComponent(partnerIdRaw.toString().trim())}`;
       const qrCanvas = document.createElement('canvas');
       await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
 
+      // Placement (separate margins so you can tweak independently)
       const qrPx = Math.floor(canvas.width * 0.15);
-      // keep your current compact margins (edit these two numbers to fine-tune independently)
       const rightMargin  = Math.floor(canvas.width * 0.02);
       const bottomMargin = Math.floor(canvas.width * 0.02);
-
       const x = canvas.width - qrPx - rightMargin;
       const y = canvas.height - qrPx - bottomMargin;
       ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
 
-      // Label above QR (single line, auto-shrink)
-      const storeName = PARTNER_MAP[normalizedId] || "";
-      const label = storeName ? `${normalizedId} | ${storeName}` : `${normalizedId}`;
+      // Single-line label above QR (auto-shrink to fit)
+      const label = storeName ? `${partnerId} | ${storeName}` : `${partnerId}`;
 
-      let fontSize = Math.max(10, Math.floor(canvas.width * 0.03)) + 1; // your latest setting
+      let fontSize = Math.max(10, Math.floor(canvas.width * 0.03)) + 1; // your latest sizing
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
       ctx.fillStyle = "#000";
@@ -227,11 +243,61 @@
       ctx.strokeText(label, textX, textY);
       ctx.fillText(label, textX, textY);
 
-      document.getElementById('downloadBtn').style.display = "inline-block";
-      document.getElementById('status').textContent =
-        storeName ? "" : "Partner ID not found in mapping. Showing Partner ID only.";
+      return new Promise((resolve) => {
+        canvas.toBlob((blob) => resolve(blob), "image/png");
+      });
     }
 
+    // ---- Single generate ----
+    genSingleBtn.addEventListener('click', async () => {
+      const rawId = partnerIdEl.value;
+      if (!rawId || !rawId.trim()) {
+        alert("Please enter Partner ID for single generation.");
+        return;
+      }
+      statusEl.textContent = "Generating…";
+      const blob = await drawCreative(rawId.trim());
+      // download single
+      const partnerId = normalizeId(rawId);
+      saveAs(blob, `creative_${partnerId}.png`);
+      statusEl.textContent = "Done.";
+    });
+
+    // ---- Bulk ZIP (uses uploaded file only) ----
+    genBulkBtn.addEventListener('click', async () => {
+      const ids = Object.keys(UPLOADED_MAP);
+      if (!ids.length) {
+        alert("Please upload an Excel/CSV first for bulk.");
+        return;
+      }
+
+      statusEl.textContent = `Generating ${ids.length} creatives…`;
+      bulkProgress.style.display = "inline-block";
+      bulkProgress.value = 0;
+      bulkProgress.max = ids.length;
+
+      const zip = new JSZip();
+
+      // Generate sequentially to limit memory spikes
+      for (let i = 0; i < ids.length; i++) {
+        const pid = ids[i];
+        const blob = await drawCreative(pid);
+        const safeName = pid.replace(/[^a-z0-9_\-]+/gi, "_").slice(0, 60);
+        zip.file(`creative_${safeName}.png`, blob);
+        bulkProgress.value = i + 1;
+        statusEl.textContent = `Generating ${i + 1}/${ids.length}…`;
+      }
+
+      statusEl.textContent = "Zipping files…";
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
+      saveAs(zipBlob, `creatives_${stamp}.zip`);
+
+      statusEl.textContent = "Bulk ZIP ready.";
+      bulkProgress.style.display = "none";
+    });
+
+    // ---- Helpers ----
     function loadImage(src) {
       return new Promise((resolve, reject) => {
         const img = new Image();
@@ -240,14 +306,6 @@
         img.onerror = reject;
         img.src = src + (src.includes("?") ? "&" : "?") + "v=" + Date.now();
       });
-    }
-
-    function downloadCreative() {
-      const canvas = document.getElementById('canvas');
-      const link = document.createElement('a');
-      link.download = "final_creative.png";
-      link.href = canvas.toDataURL("image/png");
-      link.click();
     }
   </script>
 </body>
