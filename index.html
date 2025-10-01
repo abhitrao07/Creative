@@ -83,7 +83,7 @@
       await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
 
       const qrPx = Math.floor(canvas.width * 0.15);
-      const marginPx = Math.floor(canvas.width * 0.1); // ↑ slightly bigger = lower QR
+      const marginPx = Math.floor(canvas.width * 0.02); // ↑ slightly bigger = lower QR
       const x = canvas.width - qrPx - marginPx;
       const y = canvas.height - qrPx - marginPx;
       ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
@@ -138,4 +138,5 @@
   </script>
 </body>
 </html>
+
 
