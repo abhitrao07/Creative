@@ -27,18 +27,16 @@
   <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
   <!-- CSV parser -->
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-  <!-- Excel parser (SheetJS) -->
+  <!-- Excel parser -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <!-- Zip (JSZip) + FileSaver -->
+  <!-- Zip + FileSaver -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
 </head>
 <body>
   <div class="container">
     <h2>Generate Your Jio Creative</h2>
-    <p class="hint">
-      Option A: Upload Excel/CSV for bulk • Option B: Enter one Partner ID
-    </p>
+    <p class="hint">Option A: Upload Excel/CSV for bulk • Option B: Enter one Partner ID</p>
 
     <!-- Upload mapping -->
     <div class="row">
@@ -56,7 +54,6 @@
     <div class="row">
       <button id="genSingleBtn" disabled>Generate Single</button>
       <button id="genBulkBtn" disabled>Download Bulk ZIP</button>
-      <button id="downloadBtn" style="display:none;">⬇ Download Last Creative</button>
     </div>
 
     <div id="status" class="status">Loading default mapping…</div>
@@ -69,9 +66,9 @@
     const baseImagePath = "base.jpg";
     const partnerCsvUrl = "partners.csv";
 
-    let SITE_MAP = {};       // from partners.csv at load
-    let UPLOADED_MAP = {};   // from uploaded file (replaces previous)
-    let ACTIVE_MAP = {};     // SITE_MAP + UPLOADED_MAP
+    let SITE_MAP = {};
+    let UPLOADED_MAP = {};
+    let ACTIVE_MAP = {};
     let uploadedFilename = "";
 
     // UI refs
@@ -81,11 +78,9 @@
     const partnerIdEl   = document.getElementById('partnerId');
     const genSingleBtn  = document.getElementById('genSingleBtn');
     const genBulkBtn    = document.getElementById('genBulkBtn');
-    const downloadBtn   = document.getElementById('downloadBtn');
     const statusEl      = document.getElementById('status');
     const bulkProgress  = document.getElementById('bulkProgress');
 
-    // Helpers
     const normalizeHeader = (h) => (h || "").toString().replace(/[^a-z0-9]/gi, "").toLowerCase();
     const normalizeId = (id) => (id || "").toString().trim().toUpperCase();
 
@@ -103,20 +98,12 @@
         `Active IDs: ${actCount} | Site CSV: ${siteCount} | Uploaded: ${upCount}` +
         (uploadedFilename ? ` | File: ${uploadedFilename}` : "") +
         (extra ? `\n${extra}` : "");
-      mapStatusEl.className = "diag";
     }
 
     function updateButtonsState() {
-      // Single generation always available
       genSingleBtn.disabled = false;
-
-      // Bulk button only enabled when uploaded map has >=1 entry
       genBulkBtn.disabled = Object.keys(UPLOADED_MAP).length === 0;
-
-      // Remove file enabled only if uploaded exists
       removeFileBtn.disabled = Object.keys(UPLOADED_MAP).length === 0;
-
-      // Placeholder hint
       partnerIdEl.placeholder = Object.keys(UPLOADED_MAP).length
         ? "Optional (only for single generation)"
         : "Enter Partner ID (single generation)";
@@ -140,127 +127,106 @@
       } catch { return false; }
     }
 
-    // --- Robust CSV row extraction (headered or headerless) ---
-    function rowsFromPapa(papaResult) {
-      const rows = [];
-      const data = papaResult.data || [];
-      // Try headered first
-      data.forEach(row => {
-        const id   = normalizeId(row.partner_id || row.partnerid || row.id);
-        const name = (row.store_name || row.storename || row.store || "").toString().trim();
-        if (id && name) rows.push([id, name]);
-      });
-      if (rows.length) return rows;
-
-      // If nothing parsed, retry as headerless: use first two columns
-      if (papaResult.meta && papaResult.meta.fields && papaResult.meta.fields.length) {
-        // Already had headers but nothing matched expected fields -> make a second pass by position
-        data.forEach(row => {
-          const keys = Object.keys(row);
-          if (keys.length >= 2) {
-            const id = normalizeId(row[keys[0]]);
-            const name = (row[keys[1]] || "").toString().trim();
-            if (id && name) rows.push([id, name]);
-          }
-        });
-      }
-      return rows;
-    }
-
-    // --- Robust Excel row extraction (headered or headerless) ---
-    function rowsFromSheetJS(jsonArray) {
-      const out = [];
-      if (!jsonArray || !jsonArray.length) return out;
-
-      // Normalize keys
-      const normalized = jsonArray.map(obj => {
-        const norm = {};
-        Object.keys(obj).forEach(k => norm[normalizeHeader(k)] = obj[k]);
-        return norm;
-      });
-
-      // Try headered first
-      normalized.forEach(row => {
-        const id   = normalizeId(row.partner_id || row.partnerid || row.id);
-        const name = (row.store_name || row.storename || row.store || "").toString().trim();
-        if (id && name) out.push([id, name]);
-      });
-      if (out.length) return out;
-
-      // If headerless: assume first two keys by original order from first row
-      const firstOriginal = Object.keys(jsonArray[0]);
-      const k1 = firstOriginal[0], k2 = firstOriginal[1];
-      jsonArray.forEach(obj => {
-        const id   = normalizeId(obj[k1]);
-        const name = (obj[k2] || "").toString().trim();
-        if (id && name) out.push([id, name]);
-      });
-      return out;
-    }
-
-    // ---- File upload (REPLACE previous upload) ----
+    // ---- File upload ----
     mappingFileEl.addEventListener('change', async (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
-
       uploadedFilename = file.name;
       statusEl.textContent = "Reading uploaded file…";
+      let rows = [];
 
       try {
-        let rows = [];
-
         if (file.name.toLowerCase().endsWith('.csv')) {
-          const text = await file.text();
-          // Try Papa with header:true
-          let papa = Papa.parse(text, { header: true, skipEmptyLines: true, transformHeader: normalizeHeader });
-          rows = rowsFromPapa(papa);
+          const textRaw = await file.text();
+          const text = textRaw.replace(/^\uFEFF/, ''); // strip BOM
+          const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(l => l.trim().length);
+          if (!lines.length) throw new Error("CSV appears empty");
 
-          // If still empty, try Papa with header:false (raw rows)
-          if (rows.length === 0) {
-            papa = Papa.parse(text, { header: false, skipEmptyLines: true });
-            const rawRows = papa.data || [];
-            rawRows.forEach(r => {
-              if (Array.isArray(r) && r.length >= 2) {
-                const id = normalizeId(r[0]);
-                const name = (r[1] || "").toString().trim();
-                if (id && name) rows.push([id, name]);
-              }
-            });
+          // detect delimiter
+          const sample = lines.slice(0, Math.min(lines.length, 3)).join('\n');
+          const commaCount = (sample.match(/,/g) || []).length;
+          const semiCount  = (sample.match(/;/g) || []).length;
+          const delim = semiCount > commaCount ? ';' : ',';
+
+          const splitRow = (row) => {
+            const out = [];
+            let cur = '', inQ = false;
+            for (let i = 0; i < row.length; i++) {
+              const c = row[i], n = row[i+1];
+              if (c === '"' && n === '"') { cur += '"'; i++; continue; }
+              if (c === '"') { inQ = !inQ; continue; }
+              if (!inQ && c === delim) { out.push(cur); cur = ''; continue; }
+              cur += c;
+            }
+            out.push(cur);
+            return out.map(s => s.trim());
+          };
+
+          const headerCells = splitRow(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9]/g,''));
+          const looksHeadered =
+            headerCells.includes('partnerid') || headerCells.includes('partner_id') || headerCells.includes('id') ||
+            headerCells.includes('storename') || headerCells.includes('store_name') || headerCells.includes('store');
+
+          const dataLines = looksHeadered ? lines.slice(1) : lines;
+          for (const row of dataLines) {
+            const cells = splitRow(row);
+            if (cells.length < 2) continue;
+            let idCell, nameCell;
+            if (looksHeadered) {
+              const idxId = headerCells.indexOf('partner_id') !== -1 ? headerCells.indexOf('partner_id') :
+                            headerCells.indexOf('partnerid')  !== -1 ? headerCells.indexOf('partnerid')  :
+                            headerCells.indexOf('id');
+              const idxName = headerCells.indexOf('store_name') !== -1 ? headerCells.indexOf('store_name') :
+                              headerCells.indexOf('storename')  !== -1 ? headerCells.indexOf('storename')  :
+                              headerCells.indexOf('store');
+              if (idxId === -1 || idxName === -1) continue;
+              idCell   = cells[idxId] ?? '';
+              nameCell = cells[idxName] ?? '';
+            } else {
+              idCell   = cells[0];
+              nameCell = cells[1];
+            }
+            const id   = normalizeId(idCell);
+            const name = (nameCell || "").toString().trim();
+            if (id && name) rows.push([id, name]);
           }
         } else {
           // Excel
           const buf = new Uint8Array(await file.arrayBuffer());
           const wb = XLSX.read(buf, { type: 'array' });
           const ws = wb.Sheets[wb.SheetNames[0]];
-          const json = XLSX.utils.sheet_to_json(ws, { defval: "" }); // array of objects
-          rows = rowsFromSheetJS(json);
+          const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
+          json.forEach(obj => {
+            const norm = {};
+            Object.keys(obj).forEach(k => norm[normalizeHeader(k)] = obj[k]);
+            const id   = normalizeId(norm.partner_id || norm.partnerid || norm.id);
+            const name = (norm.store_name || norm.storename || norm.store || "").toString().trim();
+            if (id && name) rows.push([id, name]);
+          });
         }
 
-        // Replace uploaded map completely
+        // Replace uploaded map
         UPLOADED_MAP = {};
         rows.forEach(([id, name]) => UPLOADED_MAP[id] = name);
 
         if (rows.length === 0) {
           mapStatusEl.className = "diag err";
           mapStatusEl.textContent =
-            `No valid rows found in "${uploadedFilename}".\n` +
-            `Expected either headers (partner_id, store_name) or first two columns as ID, Name.`;
+            `No valid rows found in "${uploadedFilename}".\nExpected headers partner_id,store_name OR first two columns.`;
         } else {
           mapStatusEl.className = "diag ok";
           mapStatusEl.textContent = `Uploaded "${uploadedFilename}": ${rows.length} row(s) loaded.`;
         }
-
         statusEl.textContent = rows.length ? "Uploaded mapping ready." : "Upload parsed with 0 rows.";
       } catch (err) {
         mapStatusEl.className = "diag err";
         mapStatusEl.textContent = `Error reading "${uploadedFilename}": ${err.message}`;
       }
 
-      rebuildActiveMap(); // updates buttons (enables bulk if rows > 0)
+      rebuildActiveMap();
     });
 
-    // Remove uploaded file/mapping
-    document.getElementById('removeFileBtn').addEventListener('click', () => {
+    removeFileBtn.addEventListener('click', () => {
       UPLOADED_MAP = {};
       uploadedFilename = "";
       mappingFileEl.value = "";
@@ -273,15 +239,13 @@
       const ok = await loadSiteCsv();
       statusEl.textContent = ok ? "Ready." : "Site CSV not found or empty. You can still upload a file.";
       rebuildActiveMap();
-      genSingleBtn.disabled = false; // single generation always allowed
+      genSingleBtn.disabled = false;
     });
 
-    // ---- Drawing logic (shared) ----
+    // ---- Drawing logic ----
     async function drawCreative(partnerIdRaw) {
       const partnerId = normalizeId(partnerIdRaw);
       const storeName = ACTIVE_MAP[partnerId] || "";
-
-      // Base
       const baseImg = await loadImage(baseImagePath);
       const canvas = document.getElementById('canvas');
       const ctx = canvas.getContext('2d');
@@ -294,7 +258,6 @@
       const qrCanvas = document.createElement('canvas');
       await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
 
-      // Placement (separate margins)
       const qrPx = Math.floor(canvas.width * 0.15);
       const rightMargin  = Math.floor(canvas.width * 0.02);
       const bottomMargin = Math.floor(canvas.width * 0.02);
@@ -302,7 +265,6 @@
       const y = canvas.height - qrPx - bottomMargin;
       ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
 
-      // Single-line label above QR (auto-shrink)
       const label = storeName ? `${partnerId} | ${storeName}` : `${partnerId}`;
       let fontSize = Math.max(10, Math.floor(canvas.width * 0.03)) + 1;
       ctx.textAlign = "center";
@@ -329,7 +291,6 @@
       });
     }
 
-    // Single generate
     genSingleBtn.addEventListener('click', async () => {
       const rawId = partnerIdEl.value;
       if (!rawId || !rawId.trim()) {
@@ -343,7 +304,6 @@
       statusEl.textContent = "Done.";
     });
 
-    // Bulk ZIP (uses uploaded file)
     genBulkBtn.addEventListener('click', async () => {
       const ids = Object.keys(UPLOADED_MAP);
       if (!ids.length) {
@@ -354,7 +314,6 @@
       bulkProgress.style.display = "inline-block";
       bulkProgress.value = 0;
       bulkProgress.max = ids.length;
-
       const zip = new JSZip();
       for (let i = 0; i < ids.length; i++) {
         const pid = ids[i];
