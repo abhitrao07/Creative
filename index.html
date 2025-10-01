@@ -10,12 +10,13 @@
     canvas { border: 1px solid #ccc; margin-top: 20px; max-width: 100%; }
     input, button { margin: 10px 0; padding: 10px; font-size: 16px; width: 80%; }
     button { cursor: pointer; background: #0078ff; color: white; border: none; border-radius: 6px; }
-    button:hover { background: #005fcc; }
+    button[disabled] { opacity: 0.6; cursor: not-allowed; }
+    button:hover:not([disabled]) { background: #005fcc; }
     .hint { font-size: 14px; color: #666; }
+    .status { font-size: 13px; color: #666; margin-top: 6px; }
+    .warn { color: #b45309; } /* amber */
   </style>
-  <!-- QR generator -->
   <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
-  <!-- CSV parser (Papa Parse) -->
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 </head>
 <body>
@@ -23,38 +24,66 @@
     <h2>Generate Your Jio Creative</h2>
     <p class="hint">Enter Partner ID and click Generate</p>
     <input type="text" id="partnerId" placeholder="Enter Partner ID" />
-    <button onclick="generateCreative()">Generate Creative</button>
+    <button id="genBtn" disabled>Generate Creative</button>
+    <div id="status" class="status">Loading partner mapping…</div>
     <canvas id="canvas"></canvas><br />
-    <button id="downloadBtn" style="display:none;" onclick="downloadCreative()">⬇ Download Creative</button>
+    <button id="downloadBtn" style="display:none;">⬇ Download Creative</button>
   </div>
 
   <script>
     // ---- CONFIG ----
-    const baseImagePath = "base.jpg";       // keep base.jpg in the same folder as this HTML
-    const partnerCsvUrl = "partners.csv";   // CSV with headers: partner_id,store_name
+    const baseImagePath = "base.jpg";
+    const partnerCsvUrl  = "partners.csv";
 
-    // Map of normalized partner_id -> store_name
     let PARTNER_MAP = {};
+    let partnersReady = null;
 
-    // Load CSV once on page load
-    window.addEventListener('DOMContentLoaded', () => {
-      fetch(partnerCsvUrl + "?v=" + Date.now())
-        .then(res => res.ok ? res.text() : "")
-        .then(csvText => {
-          if (!csvText) return;
-          const result = Papa.parse(csvText, { header: true, skipEmptyLines: true, transformHeader: h => h.trim().toLowerCase() });
-          (result.data || []).forEach(row => {
-            const id = normalizeId(row.partner_id || "");
-            const name = (row.store_name || "").trim();
-            if (id) PARTNER_MAP[id] = name;
-          });
-        })
-        .catch(() => { /* fail silently; map stays empty */ });
-    });
+    // Load CSV and resolve when ready
+    function loadPartners() {
+      if (partnersReady) return partnersReady;
+      partnersReady = new Promise((resolve) => {
+        fetch(partnerCsvUrl + "?v=" + Date.now())
+          .then(res => res.ok ? res.text() : "")
+          .then(csvText => {
+            if (!csvText) { resolve(false); return; }
+            const result = Papa.parse(csvText, {
+              header: true,
+              skipEmptyLines: true,
+              transformHeader: h => (h || "").trim().toLowerCase()
+            });
+            (result.data || []).forEach(row => {
+              const id = normalizeId(row.partner_id);
+              const name = (row.store_name || "").trim();
+              if (id) PARTNER_MAP[id] = name;
+            });
+            resolve(true);
+          })
+          .catch(() => resolve(false));
+      });
+      return partnersReady;
+    }
 
     function normalizeId(id) {
-      return (id || "").trim().toUpperCase();
+      return (id || "").toString().trim().toUpperCase(); // keep numbers as strings; preserve leading zeros
     }
+
+    // init
+    const genBtn = document.getElementById('genBtn');
+    const dlBtn  = document.getElementById('downloadBtn');
+    const status = document.getElementById('status');
+
+    (async () => {
+      const ok = await loadPartners();
+      if (ok) {
+        status.textContent = "Mapping loaded. You can generate now.";
+      } else {
+        status.innerHTML = "<span class='warn'>Mapping couldn't be loaded. Creatives will show Partner ID only.</span>";
+      }
+      genBtn.disabled = false;
+    })();
+
+    genBtn.addEventListener('click', generateCreative);
+    dlBtn.addEventListener('click', downloadCreative);
 
     async function generateCreative() {
       const rawId = document.getElementById('partnerId').value;
@@ -64,6 +93,9 @@
       }
       const normalizedId = normalizeId(rawId);
 
+      // Ensure mapping has finished loading (in case user clicks early)
+      await loadPartners();
+
       // Load base creative
       const baseImg = await loadImage(baseImagePath);
       const canvas = document.getElementById('canvas');
@@ -72,31 +104,29 @@
       canvas.height = baseImg.height;
       ctx.drawImage(baseImg, 0, 0);
 
-      // Build QR URL using the original (trimmed) input for readability on WhatsApp
+      // QR URL
       const waUrl = `https://wa.me/917000070000?text=MyJio%20${encodeURIComponent(rawId.trim())}`;
 
-      // Generate QR (native 400px; we will scale to target size)
+      // Generate QR
       const qrCanvas = document.createElement('canvas');
       await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
 
-      // Size & placement relative to creative size (looks good for any resolution)
-      const qrPx = Math.floor(canvas.width * 0.15);     // 15% of width
-      const marginPx = Math.floor(canvas.width * 0.03); // 3% margin
+      // Relative size/placement
+      const qrPx = Math.floor(canvas.width * 0.15);
+      const marginPx = Math.floor(canvas.width * 0.03);
       const x = canvas.width - qrPx - marginPx;
       const y = canvas.height - qrPx - marginPx;
 
-      // Draw QR
       ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
 
-      // Label below QR: "<PartnerID> | <Store Name>"
+      // Label
       const storeName = PARTNER_MAP[normalizedId] || "";
       const label = storeName ? `${normalizedId} | ${storeName}` : `${normalizedId}`;
 
-      // Auto-fit label width under QR
-      let fontSize = Math.max(12, Math.floor(canvas.width * 0.028)); // ~2.8% of width
+      let fontSize = Math.max(12, Math.floor(canvas.width * 0.028));
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
-      ctx.fillStyle = "#000000";
+      ctx.fillStyle = "#000";
       ctx.strokeStyle = "rgba(255,255,255,0.85)";
 
       const setFont = (px) => { ctx.font = `${px}px Arial, sans-serif`; return ctx.measureText(label).width; };
@@ -111,27 +141,28 @@
       let textX = x + (qrPx / 2);
       let textY = y + qrPx + paddingBelowQR;
 
-      // Keep text inside canvas if near bottom edge
       const minBottomPadding = fontSize + 6;
       const overflow = (textY + minBottomPadding) - canvas.height;
       if (overflow > 0) textY -= overflow;
 
-      // Stroke (outline) then fill for readability on any background
       ctx.lineWidth = Math.max(2, Math.floor(fontSize * 0.12));
       ctx.strokeText(label, textX, textY);
       ctx.fillText(label, textX, textY);
 
-      // Enable download
-      document.getElementById('downloadBtn').style.display = "inline-block";
+      dlBtn.style.display = "inline-block";
+
+      // Show a gentle notice if ID not found
+      if (!storeName) status.innerHTML = "<span class='warn'>ID not found in mapping; showing Partner ID only.</span>";
+      else status.textContent = "";
     }
 
     function loadImage(src) {
       return new Promise((resolve, reject) => {
         const img = new Image();
-        img.crossOrigin = "anonymous"; // safe for GitHub Pages
+        img.crossOrigin = "anonymous";
         img.onload = () => resolve(img);
         img.onerror = reject;
-        img.src = src + (src.includes("?") ? "&" : "?") + "v=" + Date.now(); // cache-bust
+        img.src = src + (src.includes("?") ? "&" : "?") + "v=" + Date.now();
       });
     }
 
