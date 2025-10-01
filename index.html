@@ -18,6 +18,10 @@
     .status { font-size: 13px; color: #444; margin-top: 6px; min-height: 1.2em; white-space: pre-line; }
     .diag { font-size: 12px; color: #555; margin-top: 4px; }
     progress { width: 60%; height: 12px; }
+    .ok { color: #137333; }
+    .warn { color: #b45309; }
+    .err { color: #b00020; }
+    .muted { color: #777; }
   </style>
   <!-- QR generator -->
   <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
@@ -33,7 +37,7 @@
   <div class="container">
     <h2>Generate Your Jio Creative</h2>
     <p class="hint">
-      Option A: Upload Excel/CSV (bulk) • Option B: Enter one Partner ID (single)
+      Option A: Upload Excel/CSV for bulk • Option B: Enter one Partner ID
     </p>
 
     <!-- Upload mapping -->
@@ -41,7 +45,7 @@
       <input type="file" id="mappingFile" accept=".xlsx,.xls,.csv" />
       <button id="removeFileBtn" type="button" disabled>Remove Uploaded File</button>
     </div>
-    <div id="mapStatus" class="diag"></div>
+    <div id="mapStatus" class="diag muted">No uploaded file yet.</div>
 
     <!-- Single entry -->
     <div class="row">
@@ -65,13 +69,12 @@
     const baseImagePath = "base.jpg";
     const partnerCsvUrl = "partners.csv";
 
-    // ---- Maps ----
-    let SITE_MAP = {};       // from partners.csv at page load
-    let UPLOADED_MAP = {};   // from uploaded file (replaces previous upload completely)
-    let ACTIVE_MAP = {};     // SITE_MAP + UPLOADED_MAP (uploaded overrides site)
+    let SITE_MAP = {};       // from partners.csv at load
+    let UPLOADED_MAP = {};   // from uploaded file (replaces previous)
+    let ACTIVE_MAP = {};     // SITE_MAP + UPLOADED_MAP
     let uploadedFilename = "";
 
-    // ---- UI refs ----
+    // UI refs
     const mappingFileEl = document.getElementById('mappingFile');
     const removeFileBtn = document.getElementById('removeFileBtn');
     const mapStatusEl   = document.getElementById('mapStatus');
@@ -82,12 +85,12 @@
     const statusEl      = document.getElementById('status');
     const bulkProgress  = document.getElementById('bulkProgress');
 
-    // ---- Utils ----
+    // Helpers
     const normalizeHeader = (h) => (h || "").toString().replace(/[^a-z0-9]/gi, "").toLowerCase();
     const normalizeId = (id) => (id || "").toString().trim().toUpperCase();
 
     function rebuildActiveMap() {
-      ACTIVE_MAP = { ...SITE_MAP, ...UPLOADED_MAP }; // uploaded overrides site
+      ACTIVE_MAP = { ...SITE_MAP, ...UPLOADED_MAP };
       updateMapStatus();
       updateButtonsState();
     }
@@ -100,19 +103,20 @@
         `Active IDs: ${actCount} | Site CSV: ${siteCount} | Uploaded: ${upCount}` +
         (uploadedFilename ? ` | File: ${uploadedFilename}` : "") +
         (extra ? `\n${extra}` : "");
+      mapStatusEl.className = "diag";
     }
 
     function updateButtonsState() {
-      // Single generation is always possible (with manual ID)
+      // Single generation always available
       genSingleBtn.disabled = false;
 
-      // Bulk is only enabled if uploaded file has IDs
+      // Bulk button only enabled when uploaded map has >=1 entry
       genBulkBtn.disabled = Object.keys(UPLOADED_MAP).length === 0;
 
-      // Remove file button enabled only when an upload exists
+      // Remove file enabled only if uploaded exists
       removeFileBtn.disabled = Object.keys(UPLOADED_MAP).length === 0;
 
-      // If an upload exists, single Partner ID field is optional; bulk doesn't need it
+      // Placeholder hint
       partnerIdEl.placeholder = Object.keys(UPLOADED_MAP).length
         ? "Optional (only for single generation)"
         : "Enter Partner ID (single generation)";
@@ -136,52 +140,132 @@
       } catch { return false; }
     }
 
-    // ---- File upload handling (REPLACE, not merge) ----
+    // --- Robust CSV row extraction (headered or headerless) ---
+    function rowsFromPapa(papaResult) {
+      const rows = [];
+      const data = papaResult.data || [];
+      // Try headered first
+      data.forEach(row => {
+        const id   = normalizeId(row.partner_id || row.partnerid || row.id);
+        const name = (row.store_name || row.storename || row.store || "").toString().trim();
+        if (id && name) rows.push([id, name]);
+      });
+      if (rows.length) return rows;
+
+      // If nothing parsed, retry as headerless: use first two columns
+      if (papaResult.meta && papaResult.meta.fields && papaResult.meta.fields.length) {
+        // Already had headers but nothing matched expected fields -> make a second pass by position
+        data.forEach(row => {
+          const keys = Object.keys(row);
+          if (keys.length >= 2) {
+            const id = normalizeId(row[keys[0]]);
+            const name = (row[keys[1]] || "").toString().trim();
+            if (id && name) rows.push([id, name]);
+          }
+        });
+      }
+      return rows;
+    }
+
+    // --- Robust Excel row extraction (headered or headerless) ---
+    function rowsFromSheetJS(jsonArray) {
+      const out = [];
+      if (!jsonArray || !jsonArray.length) return out;
+
+      // Normalize keys
+      const normalized = jsonArray.map(obj => {
+        const norm = {};
+        Object.keys(obj).forEach(k => norm[normalizeHeader(k)] = obj[k]);
+        return norm;
+      });
+
+      // Try headered first
+      normalized.forEach(row => {
+        const id   = normalizeId(row.partner_id || row.partnerid || row.id);
+        const name = (row.store_name || row.storename || row.store || "").toString().trim();
+        if (id && name) out.push([id, name]);
+      });
+      if (out.length) return out;
+
+      // If headerless: assume first two keys by original order from first row
+      const firstOriginal = Object.keys(jsonArray[0]);
+      const k1 = firstOriginal[0], k2 = firstOriginal[1];
+      jsonArray.forEach(obj => {
+        const id   = normalizeId(obj[k1]);
+        const name = (obj[k2] || "").toString().trim();
+        if (id && name) out.push([id, name]);
+      });
+      return out;
+    }
+
+    // ---- File upload (REPLACE previous upload) ----
     mappingFileEl.addEventListener('change', async (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
 
       uploadedFilename = file.name;
+      statusEl.textContent = "Reading uploaded file…";
+
       try {
         let rows = [];
+
         if (file.name.toLowerCase().endsWith('.csv')) {
           const text = await file.text();
-          const papa = Papa.parse(text, { header: true, skipEmptyLines: true, transformHeader: normalizeHeader });
-          (papa.data || []).forEach(row => {
-            const id   = normalizeId(row.partner_id || row.partnerid || row.id);
-            const name = (row.store_name || row.storename || row.store || "").toString().trim();
-            if (id && name) rows.push([id, name]);
-          });
+          // Try Papa with header:true
+          let papa = Papa.parse(text, { header: true, skipEmptyLines: true, transformHeader: normalizeHeader });
+          rows = rowsFromPapa(papa);
+
+          // If still empty, try Papa with header:false (raw rows)
+          if (rows.length === 0) {
+            papa = Papa.parse(text, { header: false, skipEmptyLines: true });
+            const rawRows = papa.data || [];
+            rawRows.forEach(r => {
+              if (Array.isArray(r) && r.length >= 2) {
+                const id = normalizeId(r[0]);
+                const name = (r[1] || "").toString().trim();
+                if (id && name) rows.push([id, name]);
+              }
+            });
+          }
         } else {
+          // Excel
           const buf = new Uint8Array(await file.arrayBuffer());
           const wb = XLSX.read(buf, { type: 'array' });
           const ws = wb.Sheets[wb.SheetNames[0]];
-          const raw = XLSX.utils.sheet_to_json(ws, { defval: "" });
-          raw.forEach(obj => {
-            const norm = {};
-            Object.keys(obj).forEach(k => norm[normalizeHeader(k)] = obj[k]);
-            const id   = normalizeId(norm.partner_id || norm.partnerid || norm.id);
-            const name = (norm.store_name || norm.storename || norm.store || "").toString().trim();
-            if (id && name) rows.push([id, name]);
-          });
+          const json = XLSX.utils.sheet_to_json(ws, { defval: "" }); // array of objects
+          rows = rowsFromSheetJS(json);
         }
-        // REPLACE uploaded map completely
+
+        // Replace uploaded map completely
         UPLOADED_MAP = {};
         rows.forEach(([id, name]) => UPLOADED_MAP[id] = name);
-        rebuildActiveMap();
-        statusEl.textContent = "Uploaded mapping ready. You can run Bulk ZIP now.";
+
+        if (rows.length === 0) {
+          mapStatusEl.className = "diag err";
+          mapStatusEl.textContent =
+            `No valid rows found in "${uploadedFilename}".\n` +
+            `Expected either headers (partner_id, store_name) or first two columns as ID, Name.`;
+        } else {
+          mapStatusEl.className = "diag ok";
+          mapStatusEl.textContent = `Uploaded "${uploadedFilename}": ${rows.length} row(s) loaded.`;
+        }
+
+        statusEl.textContent = rows.length ? "Uploaded mapping ready." : "Upload parsed with 0 rows.";
       } catch (err) {
-        statusEl.textContent = "Error reading uploaded file: " + err.message;
+        mapStatusEl.className = "diag err";
+        mapStatusEl.textContent = `Error reading "${uploadedFilename}": ${err.message}`;
       }
+
+      rebuildActiveMap(); // updates buttons (enables bulk if rows > 0)
     });
 
     // Remove uploaded file/mapping
-    removeFileBtn.addEventListener('click', () => {
+    document.getElementById('removeFileBtn').addEventListener('click', () => {
       UPLOADED_MAP = {};
       uploadedFilename = "";
       mappingFileEl.value = "";
-      rebuildActiveMap();
       statusEl.textContent = "Uploaded mapping cleared. Using Site CSV only.";
+      rebuildActiveMap();
     });
 
     // ---- Init ----
@@ -189,14 +273,15 @@
       const ok = await loadSiteCsv();
       statusEl.textContent = ok ? "Ready." : "Site CSV not found or empty. You can still upload a file.";
       rebuildActiveMap();
+      genSingleBtn.disabled = false; // single generation always allowed
     });
 
-    // ---- Drawing logic (reused for single & bulk) ----
+    // ---- Drawing logic (shared) ----
     async function drawCreative(partnerIdRaw) {
       const partnerId = normalizeId(partnerIdRaw);
       const storeName = ACTIVE_MAP[partnerId] || "";
 
-      // Load base
+      // Base
       const baseImg = await loadImage(baseImagePath);
       const canvas = document.getElementById('canvas');
       const ctx = canvas.getContext('2d');
@@ -209,7 +294,7 @@
       const qrCanvas = document.createElement('canvas');
       await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
 
-      // Placement (separate margins so you can tweak independently)
+      // Placement (separate margins)
       const qrPx = Math.floor(canvas.width * 0.15);
       const rightMargin  = Math.floor(canvas.width * 0.02);
       const bottomMargin = Math.floor(canvas.width * 0.02);
@@ -217,15 +302,13 @@
       const y = canvas.height - qrPx - bottomMargin;
       ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
 
-      // Single-line label above QR (auto-shrink to fit)
+      // Single-line label above QR (auto-shrink)
       const label = storeName ? `${partnerId} | ${storeName}` : `${partnerId}`;
-
-      let fontSize = Math.max(10, Math.floor(canvas.width * 0.03)) + 1; // your latest sizing
+      let fontSize = Math.max(10, Math.floor(canvas.width * 0.03)) + 1;
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
       ctx.fillStyle = "#000";
       ctx.strokeStyle = "rgba(255,255,255,0.9)";
-
       const maxWidth = qrPx * 0.95;
       const measure = (px) => { ctx.font = `${px}px Arial, sans-serif`; return ctx.measureText(label).width; };
       let textWidth = measure(fontSize);
@@ -233,12 +316,10 @@
         fontSize -= 1;
         textWidth = measure(fontSize);
       }
-
       const paddingAboveQR = Math.floor(qrPx * 0.14);
       const textX = x + (qrPx / 2);
       let textY = y - paddingAboveQR - fontSize;
       if (textY < 4) textY = 4;
-
       ctx.lineWidth = Math.max(2, Math.floor(fontSize * 0.12));
       ctx.strokeText(label, textX, textY);
       ctx.fillText(label, textX, textY);
@@ -248,7 +329,7 @@
       });
     }
 
-    // ---- Single generate ----
+    // Single generate
     genSingleBtn.addEventListener('click', async () => {
       const rawId = partnerIdEl.value;
       if (!rawId || !rawId.trim()) {
@@ -257,28 +338,24 @@
       }
       statusEl.textContent = "Generating…";
       const blob = await drawCreative(rawId.trim());
-      // download single
       const partnerId = normalizeId(rawId);
       saveAs(blob, `creative_${partnerId}.png`);
       statusEl.textContent = "Done.";
     });
 
-    // ---- Bulk ZIP (uses uploaded file only) ----
+    // Bulk ZIP (uses uploaded file)
     genBulkBtn.addEventListener('click', async () => {
       const ids = Object.keys(UPLOADED_MAP);
       if (!ids.length) {
         alert("Please upload an Excel/CSV first for bulk.");
         return;
       }
-
       statusEl.textContent = `Generating ${ids.length} creatives…`;
       bulkProgress.style.display = "inline-block";
       bulkProgress.value = 0;
       bulkProgress.max = ids.length;
 
       const zip = new JSZip();
-
-      // Generate sequentially to limit memory spikes
       for (let i = 0; i < ids.length; i++) {
         const pid = ids[i];
         const blob = await drawCreative(pid);
@@ -287,17 +364,14 @@
         bulkProgress.value = i + 1;
         statusEl.textContent = `Generating ${i + 1}/${ids.length}…`;
       }
-
       statusEl.textContent = "Zipping files…";
       const zipBlob = await zip.generateAsync({ type: "blob" });
       const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
       saveAs(zipBlob, `creatives_${stamp}.zip`);
-
       statusEl.textContent = "Bulk ZIP ready.";
       bulkProgress.style.display = "none";
     });
 
-    // ---- Helpers ----
     function loadImage(src) {
       return new Promise((resolve, reject) => {
         const img = new Image();
