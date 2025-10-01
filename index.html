@@ -103,44 +103,43 @@
       const qrCanvas = document.createElement('canvas');
       await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
 
-      // Placement
+      // Placement of QR
       const qrPx = Math.floor(canvas.width * 0.15);
       const marginPx = Math.floor(canvas.width * 0.03);
       const x = canvas.width - qrPx - marginPx;
       const y = canvas.height - qrPx - marginPx;
-
       ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
 
-      // ---- Show Store Name ONLY ----
+      // ---- Text ABOVE QR: PartnerID | StoreName ----
       const storeName = PARTNER_MAP[normalizedId] || "";
-      if (storeName) {
-        let fontSize = Math.max(12, Math.floor(canvas.width * 0.028));
-        ctx.textAlign = "center";
-        ctx.textBaseline = "top";
-        ctx.fillStyle = "#000";
-        ctx.strokeStyle = "rgba(255,255,255,0.85)";
+      const label = storeName ? `${normalizedId} | ${storeName}` : `${normalizedId}`;
 
-        const setFont = (px) => { ctx.font = `${px}px Arial, sans-serif`; return ctx.measureText(storeName).width; };
-        let textWidth = setFont(fontSize);
-        const maxWidth = qrPx * 0.95;
-        while (textWidth > maxWidth && fontSize > 10) {
-          fontSize -= 1;
-          textWidth = setFont(fontSize);
-        }
+      let fontSize = Math.max(12, Math.floor(canvas.width * 0.028));
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom"; // align bottom edge of text
+      ctx.fillStyle = "#000";
+      ctx.strokeStyle = "rgba(255,255,255,0.85)";
 
-        const paddingBelowQR = Math.floor(qrPx * 0.08);
-        let textX = x + (qrPx / 2);
-        let textY = y + qrPx + paddingBelowQR;
-
-        const overflow = (textY + fontSize + 6) - canvas.height;
-        if (overflow > 0) textY -= overflow;
-
-        ctx.lineWidth = Math.max(2, Math.floor(fontSize * 0.12));
-        ctx.strokeText(storeName, textX, textY);
-        ctx.fillText(storeName, textX, textY);
-      } else {
-        status.innerHTML = "<span class='warn'>ID not found in mapping. No store name displayed.</span>";
+      const setFont = (px) => { ctx.font = `${px}px Arial, sans-serif`; return ctx.measureText(label).width; };
+      let textWidth = setFont(fontSize);
+      const maxWidth = qrPx * 0.95;
+      while (textWidth > maxWidth && fontSize > 10) {
+        fontSize -= 1;
+        textWidth = setFont(fontSize);
       }
+
+      const paddingAboveQR = Math.floor(qrPx * 0.08);
+      let textX = x + (qrPx / 2);
+      let textY = y - paddingAboveQR; // place just above QR
+
+      // Prevent cut-off at top
+      if (textY - fontSize < 0) {
+        textY = fontSize + 4; // nudge down if too high
+      }
+
+      ctx.lineWidth = Math.max(2, Math.floor(fontSize * 0.12));
+      ctx.strokeText(label, textX, textY);
+      ctx.fillText(label, textX, textY);
 
       dlBtn.style.display = "inline-block";
     }
