@@ -37,7 +37,6 @@
     let PARTNER_MAP = {};
     let partnersReady = null;
 
-    // Load CSV mapping
     function loadPartners() {
       if (partnersReady) return partnersReady;
       partnersReady = new Promise((resolve) => {
@@ -104,89 +103,45 @@
       const qrCanvas = document.createElement('canvas');
       await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
 
-      // Placement of QR
+      // Placement of QR (lower down by increasing bottom margin)
       const qrPx = Math.floor(canvas.width * 0.15);
-      const marginPx = Math.floor(canvas.width * 0.03);
+      const marginPx = Math.floor(canvas.width * 0.05); // bigger margin = lower QR
       const x = canvas.width - qrPx - marginPx;
       const y = canvas.height - qrPx - marginPx;
       ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
 
-      // ---- Text ABOVE QR: PartnerID | StoreName with wrapping ----
+      // ---- Text ABOVE QR: PartnerID | StoreName ----
       const storeName = PARTNER_MAP[normalizedId] || "";
       const label = storeName ? `${normalizedId} | ${storeName}` : `${normalizedId}`;
 
-      let fontSize = Math.max(12, Math.floor(canvas.width * 0.028));
+      // Smaller starting font
+      let fontSize = Math.max(10, Math.floor(canvas.width * 0.02));
       ctx.textAlign = "center";
-      ctx.textBaseline = "top";
+      ctx.textBaseline = "bottom";
       ctx.fillStyle = "#000";
       ctx.strokeStyle = "rgba(255,255,255,0.85)";
-      ctx.font = `${fontSize}px Arial, sans-serif`;
 
+      // Fit text into QR width (shrink if too long)
+      const setFont = (px) => { ctx.font = `${px}px Arial, sans-serif`; return ctx.measureText(label).width; };
+      let textWidth = setFont(fontSize);
       const maxWidth = qrPx * 0.95;
-
-      // Wrap function
-      function wrapText(ctx, text, maxWidth) {
-        const words = text.split(" ");
-        const lines = [];
-        let current = words[0];
-        for (let i = 1; i < words.length; i++) {
-          const testLine = current + " " + words[i];
-          if (ctx.measureText(testLine).width <= maxWidth) {
-            current = testLine;
-          } else {
-            lines.push(current);
-            current = words[i];
-          }
-        }
-        lines.push(current);
-        return lines;
-      }
-
-      let lines = wrapText(ctx, label, maxWidth);
-      // shrink font until <=3 lines
-      while (lines.length > 3 && fontSize > 10) {
+      while (textWidth > maxWidth && fontSize > 8) {
         fontSize -= 1;
-        ctx.font = `${fontSize}px Arial, sans-serif`;
-        lines = wrapText(ctx, label, maxWidth);
+        textWidth = setFont(fontSize);
       }
 
-      const lineHeight = fontSize * 1.2;
-      const totalHeight = lines.length * lineHeight;
-      const paddingAboveQR = Math.floor(qrPx * 0.08);
-
+      // Place just above QR
+      const paddingAboveQR = Math.floor(qrPx * 0.1);
       let textX = x + (qrPx / 2);
-      let startY = y - paddingAboveQR - totalHeight;
+      let textY = y - paddingAboveQR;
 
-      // prevent cut-off
-      if (startY < 0) startY = 4;
+      if (textY - fontSize < 0) textY = fontSize + 4; // avoid cut-off
 
-      lines.forEach((line, i) => {
-        const textY = startY + i * lineHeight;
-        ctx.lineWidth = Math.max(2, Math.floor(fontSize * 0.12));
-        ctx.strokeText(line, textX, textY);
-        ctx.fillText(line, textX, textY);
-      });
+      ctx.lineWidth = Math.max(2, Math.floor(fontSize * 0.12));
+      ctx.strokeText(label, textX, textY);
+      ctx.fillText(label, textX, textY);
 
       dlBtn.style.display = "inline-block";
     }
 
-    function loadImage(src) {
-      return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.crossOrigin = "anonymous";
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = src + (src.includes("?") ? "&" : "?") + "v=" + Date.now();
-      });
-    }
-
-    function downloadCreative() {
-      const canvas = document.getElementById('canvas');
-      const link = document.createElement('a');
-      link.download = "final_creative.png";
-      link.href = canvas.toDataURL("image/png");
-      link.click();
-    }
-  </script>
-</body>
-</html>
+    function loadImage(src)
