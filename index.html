@@ -37,7 +37,6 @@
     let PARTNER_MAP = {};
     let partnersReady = null;
 
-    // Load CSV mapping
     function loadPartners() {
       if (partnersReady) return partnersReady;
       partnersReady = new Promise((resolve) => {
@@ -53,7 +52,7 @@
             (result.data || []).forEach(row => {
               const id = normalizeId(row.partner_id);
               const name = (row.store_name || "").trim();
-              if (id) PARTNER_MAP[id] = name;
+              if (id && name) PARTNER_MAP[id] = name;
             });
             resolve(true);
           })
@@ -74,7 +73,7 @@
       const ok = await loadPartners();
       status.textContent = ok
         ? "Mapping loaded. You can generate now."
-        : "Mapping could not be loaded. Creatives will only show Partner ID.";
+        : "Mapping could not be loaded.";
       genBtn.disabled = false;
     })();
 
@@ -101,8 +100,6 @@
 
       // QR URL
       const waUrl = `https://wa.me/917000070000?text=MyJio%20${encodeURIComponent(rawId.trim())}`;
-
-      // Generate QR
       const qrCanvas = document.createElement('canvas');
       await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
 
@@ -114,36 +111,36 @@
 
       ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
 
-      // ---- Show Store Name only ----
-      const storeName = PARTNER_MAP[normalizedId] || "Store Not Found";
-      const label = storeName;
+      // ---- Show Store Name ONLY ----
+      const storeName = PARTNER_MAP[normalizedId] || "";
+      if (storeName) {
+        let fontSize = Math.max(12, Math.floor(canvas.width * 0.028));
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillStyle = "#000";
+        ctx.strokeStyle = "rgba(255,255,255,0.85)";
 
-      // Fit text under QR
-      let fontSize = Math.max(12, Math.floor(canvas.width * 0.028));
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      ctx.fillStyle = "#000";
-      ctx.strokeStyle = "rgba(255,255,255,0.85)";
+        const setFont = (px) => { ctx.font = `${px}px Arial, sans-serif`; return ctx.measureText(storeName).width; };
+        let textWidth = setFont(fontSize);
+        const maxWidth = qrPx * 0.95;
+        while (textWidth > maxWidth && fontSize > 10) {
+          fontSize -= 1;
+          textWidth = setFont(fontSize);
+        }
 
-      const setFont = (px) => { ctx.font = `${px}px Arial, sans-serif`; return ctx.measureText(label).width; };
-      let textWidth = setFont(fontSize);
-      const maxWidth = qrPx * 0.95;
-      while (textWidth > maxWidth && fontSize > 10) {
-        fontSize -= 1;
-        textWidth = setFont(fontSize);
+        const paddingBelowQR = Math.floor(qrPx * 0.08);
+        let textX = x + (qrPx / 2);
+        let textY = y + qrPx + paddingBelowQR;
+
+        const overflow = (textY + fontSize + 6) - canvas.height;
+        if (overflow > 0) textY -= overflow;
+
+        ctx.lineWidth = Math.max(2, Math.floor(fontSize * 0.12));
+        ctx.strokeText(storeName, textX, textY);
+        ctx.fillText(storeName, textX, textY);
+      } else {
+        status.innerHTML = "<span class='warn'>ID not found in mapping. No store name displayed.</span>";
       }
-
-      const paddingBelowQR = Math.floor(qrPx * 0.08);
-      let textX = x + (qrPx / 2);
-      let textY = y + qrPx + paddingBelowQR;
-
-      // Keep inside canvas
-      const overflow = (textY + fontSize + 6) - canvas.height;
-      if (overflow > 0) textY -= overflow;
-
-      ctx.lineWidth = Math.max(2, Math.floor(fontSize * 0.12));
-      ctx.strokeText(label, textX, textY);
-      ctx.fillText(label, textX, textY);
 
       dlBtn.style.display = "inline-block";
     }
