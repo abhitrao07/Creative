@@ -73,4 +73,75 @@
       ctx.drawImage(baseImg, 0, 0);
 
       // Build QR URL using the original (trimmed) input for readability on WhatsApp
-      const waUrl = `https://wa.me/917000070000?text=MyJio%20${
+      const waUrl = `https://wa.me/917000070000?text=MyJio%20${encodeURIComponent(rawId.trim())}`;
+
+      // Generate QR (native 400px; we will scale to target size)
+      const qrCanvas = document.createElement('canvas');
+      await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
+
+      // Size & placement relative to creative size (looks good for any resolution)
+      const qrPx = Math.floor(canvas.width * 0.15);     // 15% of width
+      const marginPx = Math.floor(canvas.width * 0.03); // 3% margin
+      const x = canvas.width - qrPx - marginPx;
+      const y = canvas.height - qrPx - marginPx;
+
+      // Draw QR
+      ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
+
+      // Label below QR: "<PartnerID> | <Store Name>"
+      const storeName = PARTNER_MAP[normalizedId] || "";
+      const label = storeName ? `${normalizedId} | ${storeName}` : `${normalizedId}`;
+
+      // Auto-fit label width under QR
+      let fontSize = Math.max(12, Math.floor(canvas.width * 0.028)); // ~2.8% of width
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillStyle = "#000000";
+      ctx.strokeStyle = "rgba(255,255,255,0.85)";
+
+      const setFont = (px) => { ctx.font = `${px}px Arial, sans-serif`; return ctx.measureText(label).width; };
+      let textWidth = setFont(fontSize);
+      const maxWidth = qrPx * 0.95;
+      while (textWidth > maxWidth && fontSize > 10) {
+        fontSize -= 1;
+        textWidth = setFont(fontSize);
+      }
+
+      const paddingBelowQR = Math.floor(qrPx * 0.08);
+      let textX = x + (qrPx / 2);
+      let textY = y + qrPx + paddingBelowQR;
+
+      // Keep text inside canvas if near bottom edge
+      const minBottomPadding = fontSize + 6;
+      const overflow = (textY + minBottomPadding) - canvas.height;
+      if (overflow > 0) textY -= overflow;
+
+      // Stroke (outline) then fill for readability on any background
+      ctx.lineWidth = Math.max(2, Math.floor(fontSize * 0.12));
+      ctx.strokeText(label, textX, textY);
+      ctx.fillText(label, textX, textY);
+
+      // Enable download
+      document.getElementById('downloadBtn').style.display = "inline-block";
+    }
+
+    function loadImage(src) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous"; // safe for GitHub Pages
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = src + (src.includes("?") ? "&" : "?") + "v=" + Date.now(); // cache-bust
+      });
+    }
+
+    function downloadCreative() {
+      const canvas = document.getElementById('canvas');
+      const link = document.createElement('a');
+      link.download = "final_creative.png";
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+    }
+  </script>
+</body>
+</html>
