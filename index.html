@@ -200,4 +200,213 @@
 
           const dataLines = looksHeadered ? lines.slice(1) : lines;
 
-          for (const row of data
+          for (const row of dataLines) {
+            const cells = splitRow(row);
+            if (cells.length < 2) continue;
+
+            let idCell, nameCell;
+            if (looksHeadered) {
+              const idxId =
+                headerCells.indexOf('partner_id') !== -1 ? headerCells.indexOf('partner_id') :
+                headerCells.indexOf('partnerid')  !== -1 ? headerCells.indexOf('partnerid')  :
+                headerCells.indexOf('id');
+              const idxName =
+                headerCells.indexOf('store_name') !== -1 ? headerCells.indexOf('store_name') :
+                headerCells.indexOf('storename')  !== -1 ? headerCells.indexOf('storename')  :
+                headerCells.indexOf('store');
+              if (idxId === -1 || idxName === -1) continue;
+              idCell   = cells[idxId] ?? '';
+              nameCell = cells[idxName] ?? '';
+            } else {
+              idCell   = cells[0];
+              nameCell = cells[1];
+            }
+
+            const id   = normalizeId(idCell);
+            const name = (nameCell || "").toString().trim();
+            if (id && name) rows.push([id, name]);
+          }
+        } else {
+          // Excel
+          const buf = new Uint8Array(await file.arrayBuffer());
+          const wb = XLSX.read(buf, { type: 'array' });
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
+          json.forEach(obj => {
+            const norm = {};
+            Object.keys(obj).forEach(k => norm[normalizeHeader(k)] = obj[k]);
+            const id   = normalizeId(norm.partner_id || norm.partnerid || norm.id);
+            const name = (norm.store_name || norm.storename || norm.store || "").toString().trim();
+            if (id && name) rows.push([id, name]);
+          });
+        }
+
+        // Replace upload map + keep an ordered list of IDs
+        UPLOADED_MAP = {};
+        uploadedIds = [];
+        rows.forEach(([id, name]) => {
+          if (!(id in UPLOADED_MAP)) uploadedIds.push(id);
+          UPLOADED_MAP[id] = name;
+        });
+
+        // Show filename + clear X
+        fileNameLabel.textContent = uploadedFilename + ` — ${uploadedIds.length} ID(s)`;
+        fileLineEl.style.display = "flex";
+
+        // Status
+        if (uploadedIds.length === 0) {
+          mapStatusEl.className = "diag err";
+          mapStatusEl.textContent =
+            `No valid rows found in "${uploadedFilename}". Expect headers partner_id,store_name OR first two columns.`;
+        } else {
+          mapStatusEl.className = "diag ok";
+          mapStatusEl.textContent = `Uploaded "${uploadedFilename}": ${uploadedIds.length} row(s) loaded.`;
+        }
+        statusEl.textContent = uploadedIds.length ? "Uploaded mapping ready." : "Upload parsed with 0 rows.";
+      } catch (err) {
+        mapStatusEl.className = "diag err";
+        mapStatusEl.textContent = `Error reading "${uploadedFilename}": ${err.message}`;
+        fileLineEl.style.display = "none";
+        uploadedFilename = "";
+        UPLOADED_MAP = {};
+        uploadedIds = [];
+      }
+
+      rebuildActiveMap();
+    });
+
+    // Clear uploaded file via × icon
+    clearUploadEl.addEventListener('click', () => {
+      UPLOADED_MAP = {};
+      uploadedIds = [];
+      uploadedFilename = "";
+      mappingFileEl.value = "";
+      fileLineEl.style.display = "none";
+      statusEl.textContent = "Uploaded mapping cleared. Using Site CSV only (if available).";
+      rebuildActiveMap();
+    });
+
+    // --- Init ---
+    document.addEventListener('DOMContentLoaded', async () => {
+      const ok = await loadSiteCsv();
+      statusEl.textContent = ok ? "Ready." : "Site CSV not found or empty. You can still upload a file.";
+      rebuildActiveMap();
+      updateGenerateState();
+    });
+
+    // --- Draw creative (shared) ---
+    async function drawCreative(partnerIdRaw) {
+      const partnerId = normalizeId(partnerIdRaw);
+      const storeName = ACTIVE_MAP[partnerId] || "";
+
+      // Base
+      const baseImg = await loadImage(baseImagePath);
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = baseImg.width;
+      canvas.height = baseImg.height;
+      ctx.drawImage(baseImg, 0, 0);
+
+      // QR (WhatsApp deep link)
+      const waUrl = `https://wa.me/917000070000?text=MyJio%20${encodeURIComponent(partnerIdRaw.toString().trim())}`;
+      const qrCanvas = document.createElement('canvas');
+      await QRCode.toCanvas(qrCanvas, waUrl, { width: 400, margin: 1 });
+
+      // Placement (separate margins so you can tweak independently)
+      const qrPx = Math.floor(canvas.width * 0.15);
+      const rightMargin  = Math.floor(canvas.width * 0.02);
+      const bottomMargin = Math.floor(canvas.width * 0.02);
+      const x = canvas.width - qrPx - rightMargin;
+      const y = canvas.height - qrPx - bottomMargin;
+      ctx.drawImage(qrCanvas, x, y, qrPx, qrPx);
+
+      // Label (single line, auto-shrink) above QR
+      const label = storeName ? `${partnerId} | ${storeName}` : `${partnerId}`;
+      let fontSize = Math.max(10, Math.floor(canvas.width * 0.03)) + 1;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillStyle = "#000";
+      ctx.strokeStyle = "rgba(255,255,255,0.9)";
+      const maxWidth = qrPx * 0.95;
+      const measure = (px) => { ctx.font = `${px}px Arial, sans-serif`; return ctx.measureText(label).width; };
+      let textWidth = measure(fontSize);
+      while (textWidth > maxWidth && fontSize > 8) {
+        fontSize -= 1;
+        textWidth = measure(fontSize);
+      }
+      const paddingAboveQR = Math.floor(qrPx * 0.14);
+      const textX = x + (qrPx / 2);
+      let textY = y - paddingAboveQR - fontSize;
+      if (textY < 4) textY = 4;
+      ctx.lineWidth = Math.max(2, Math.floor(fontSize * 0.12));
+      ctx.strokeText(label, textX, textY);
+      ctx.fillText(label, textX, textY);
+
+      // Return as Blob
+      return new Promise((resolve) => {
+        canvas.toBlob((blob) => resolve(blob), "image/png");
+      });
+    }
+
+    // --- Single CTA: Generate ---
+    genBtn.addEventListener('click', async () => {
+      // Priority: uploaded file if present; else single field
+      const count = uploadedIds.length;
+      if (count > 0) {
+        // If exactly 1, create single; if >1, create ZIP
+        if (count === 1) {
+          statusEl.textContent = "Generating…";
+          const id = uploadedIds[0];
+          const blob = await drawCreative(id);
+          const safe = id.replace(/[^a-z0-9_\-]+/gi, "_").slice(0, 60);
+          saveAs(blob, `creative_${safe}.png`);
+          statusEl.textContent = "Done.";
+        } else {
+          statusEl.textContent = `Generating ${count} creatives…`;
+          bulkProgress.style.display = "inline-block";
+          bulkProgress.value = 0;
+          bulkProgress.max = count;
+          const zip = new JSZip();
+          for (let i = 0; i < count; i++) {
+            const id = uploadedIds[i];
+            const blob = await drawCreative(id);
+            const safe = id.replace(/[^a-z0-9_\-]+/gi, "_").slice(0, 60);
+            zip.file(`creative_${safe}.png`, blob);
+            bulkProgress.value = i + 1;
+            statusEl.textContent = `Generating ${i + 1}/${count}…`;
+          }
+          statusEl.textContent = "Zipping files…";
+          const zipBlob = await zip.generateAsync({ type: "blob" });
+          const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
+          saveAs(zipBlob, `creatives_${stamp}.zip`);
+          statusEl.textContent = "Bulk ZIP ready.";
+          bulkProgress.style.display = "none";
+        }
+      } else {
+        // No upload → try single Partner ID input
+        const rawId = partnerIdEl.value.trim();
+        if (!rawId) {
+          alert("Please upload a file or enter a Partner ID.");
+          return;
+        }
+        statusEl.textContent = "Generating…";
+        const blob = await drawCreative(rawId);
+        const safe = normalizeId(rawId).replace(/[^a-z0-9_\-]+/gi, "_").slice(0, 60);
+        saveAs(blob, `creative_${safe}.png`);
+        statusEl.textContent = "Done.";
+      }
+    });
+
+    // --- Image loader with cache-bust ---
+    function loadImage(src) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = src + (src.includes("?") ? "&" : "?") + "v=" + Date.now();
+      });
+    }
+  </script>
+</body>
+</html>
