@@ -17,26 +17,33 @@
     button:hover:not([disabled]) { background: var(--blue-dark); }
     .hint { font-size: 14px; color: #666; margin-bottom: 6px; }
     .status { font-size: 13px; color: #444; margin-top: 8px; min-height: 1.2em; white-space: pre-line; }
-    .diag { font-size: 12px; color: var(--muted); margin-top: 6px; }
-    progress { width: 60%; height: 12px; }
+    .subhead { font-size: 14px; margin: 6px 0 10px; }
     .ok { color: var(--ok); }
     .err { color: var(--err); }
+    progress { width: 60%; height: 12px; }
+    /* File line with red clear "×" */
     .fileline { display:flex; align-items:center; justify-content:center; gap:8px; margin-top:4px; }
     .filename { font-size: 13px; color:#333; }
-    .clearX { font-size: 18px; line-height: 1; cursor:pointer; color:#999; user-select:none; }
-    .clearX:hover { color:#444; }
+    .clearX { font-size: 18px; line-height: 1; cursor:pointer; color:#d11; user-select:none; }
+    .clearX:hover { color:#a00; }
   </style>
+  <!-- QR generator -->
   <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+  <!-- CSV parser -->
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <!-- Excel parser -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <!-- Zip + FileSaver -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
 </head>
 <body>
   <div class="container">
     <h2>Generate Your Jio Creative</h2>
-    <p class="hint">Upload Excel/CSV for bulk (or) enter a single Partner ID. One “Generate” button decides automatically.</p>
+    <div id="entryCount" class="subhead ok">Entries: 0</div>
+    <p class="hint">Upload Excel/CSV for bulk (or) enter a single Partner ID.</p>
 
+    <!-- Upload mapping -->
     <div class="row">
       <input type="file" id="mappingFile" accept=".xlsx,.xls,.csv" />
       <button id="downloadTemplateBtn" type="button">Download CSV Template</button>
@@ -45,12 +52,13 @@
       <span class="filename" id="fileNameLabel"></span>
       <span class="clearX" id="clearUpload" title="Clear uploaded file">×</span>
     </div>
-    <div id="mapStatus" class="diag">No uploaded file yet.</div>
 
+    <!-- Single entry -->
     <div class="row" style="margin-top:8px;">
       <input type="text" id="partnerId" placeholder="Enter Partner ID (used if no file)" />
     </div>
 
+    <!-- Single CTA -->
     <div class="row">
       <button id="genBtn" disabled>Generate</button>
     </div>
@@ -75,30 +83,25 @@
     const fileLineEl    = document.getElementById('fileLine');
     const fileNameLabel = document.getElementById('fileNameLabel');
     const clearUploadEl = document.getElementById('clearUpload');
-    const mapStatusEl   = document.getElementById('mapStatus');
     const partnerIdEl   = document.getElementById('partnerId');
     const genBtn        = document.getElementById('genBtn');
     const statusEl      = document.getElementById('status');
     const bulkProgress  = document.getElementById('bulkProgress');
     const templateBtn   = document.getElementById('downloadTemplateBtn');
+    const entryCountEl  = document.getElementById('entryCount');
 
     const normalizeHeader = (h) => (h || "").toString().replace(/[^a-z0-9]/gi, "").toLowerCase();
     const normalizeId = (id) => (id || "").toString().trim().toUpperCase();
 
-    function rebuildActiveMap() {
-      ACTIVE_MAP = { ...SITE_MAP, ...UPLOADED_MAP };
-      updateMapStatus();
-      updateGenerateState();
+    function setEntryCount(n) {
+      entryCountEl.textContent = `Entries: ${n}`;
     }
 
-    function updateMapStatus(extra="") {
-      const siteCount = Object.keys(SITE_MAP).length;
-      const upCount   = Object.keys(UPLOADED_MAP).length;
-      const actCount  = Object.keys(ACTIVE_MAP).length;
-      let text = `Active IDs: ${actCount} | Site CSV: ${siteCount} | Uploaded: ${upCount}`;
-      if (uploadedFilename) text += ` | File: ${uploadedFilename}`;
-      if (extra) text += `\n${extra}`;
-      mapStatusEl.textContent = text;
+    function rebuildActiveMap() {
+      ACTIVE_MAP = { ...SITE_MAP, ...UPLOADED_MAP };
+      updateGenerateState();
+      // green sub-heading shows ONLY uploaded count
+      setEntryCount(uploadedIds.length);
     }
 
     function updateGenerateState() {
@@ -127,12 +130,8 @@
       } catch { return false; }
     }
 
-    // Add a timeout so UI never hangs on "Loading…"
     function withTimeout(promise, ms) {
-      return Promise.race([
-        promise,
-        new Promise(res => setTimeout(() => res(false), ms))
-      ]);
+      return Promise.race([ promise, new Promise(res => setTimeout(() => res(false), ms)) ]);
     }
 
     // CSV Template
@@ -144,7 +143,7 @@
       saveAs(blob, `partner_mapping_template_${stamp}.csv`);
     });
 
-    // Upload (robust CSV/Excel)
+    // Upload (robust CSV/Excel) -> REPLACE uploaded map
     mappingFileEl.addEventListener('change', async (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
@@ -230,24 +229,17 @@
           UPLOADED_MAP[id] = name;
         });
 
-        // Show filename + clear ×
         if (uploadedIds.length > 0) {
           fileNameLabel.textContent = uploadedFilename + ` — ${uploadedIds.length} ID(s)`;
           fileLineEl.style.display = "flex";
-          mapStatusEl.className = "diag ok";
-          mapStatusEl.textContent = `Uploaded "${uploadedFilename}": ${uploadedIds.length} row(s) loaded.`;
           statusEl.textContent = "Uploaded mapping ready.";
         } else {
           fileLineEl.style.display = "none";
-          mapStatusEl.className = "diag err";
-          mapStatusEl.textContent = `No valid rows found in "${uploadedFilename}".`;
           statusEl.textContent = "Upload parsed with 0 rows.";
         }
       } catch (err) {
         fileLineEl.style.display = "none";
-        mapStatusEl.className = "diag err";
-        mapStatusEl.textContent = `Error reading "${uploadedFilename}": ${err.message}`;
-        statusEl.textContent = "Upload failed.";
+        statusEl.textContent = `Upload failed: ${err.message}`;
         UPLOADED_MAP = {}; uploadedIds = []; uploadedFilename = "";
       }
       rebuildActiveMap();
@@ -263,16 +255,12 @@
       rebuildActiveMap();
     });
 
-    // Init with timeout: proceed even if partners.csv fails
+    // Init with timeout so UI never hangs
     document.addEventListener('DOMContentLoaded', async () => {
       const ok = await withTimeout(loadSiteCsv(), 4000);
-      if (ok) {
-        statusEl.textContent = "Ready.";
-      } else {
-        statusEl.textContent = "Ready. (Site CSV not found or slow — you can still upload a file or enter a Partner ID.)";
-      }
+      statusEl.textContent = ok ? "Ready." : "Ready. (Site CSV not found or slow — you can still upload a file or enter a Partner ID.)";
       rebuildActiveMap();
-      updateGenerateState(); // ensure Generate enabled when typing ID
+      updateGenerateState();
     });
 
     async function drawCreative(partnerIdRaw) {
