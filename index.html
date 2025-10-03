@@ -5,22 +5,30 @@
   <title>Jio Partner Creative Generator</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
+    :root {
+      --blue:#0078ff; --blue-dark:#005fcc; --muted:#777; --ok:#137333; --err:#b00020;
+    }
     body { font-family: Arial, sans-serif; margin: 30px; text-align: center; }
     .container { max-width: 900px; margin: auto; }
-    canvas { border: 1px solid #ccc; margin-top: 20px; max-width: 100%; }
+    canvas { border: 1px solid #ccc; margin-top: 16px; max-width: 100%; }
     .row { display: flex; gap: 12px; justify-content: center; align-items: center; flex-wrap: wrap; }
-    input[type="text"], input[type="file"], button { margin: 10px 0; padding: 10px; font-size: 16px; }
+    input[type="text"], input[type="file"], button { padding: 10px; font-size: 16px; }
     input[type="text"] { width: 60%; min-width: 260px; }
-    button { cursor: pointer; background: #0078ff; color: white; border: none; border-radius: 6px; }
+    button { cursor: pointer; background: var(--blue); color: white; border: none; border-radius: 6px; padding: 10px 16px; }
     button[disabled] { opacity: 0.6; cursor: not-allowed; }
-    button:hover:not([disabled]) { background: #005fcc; }
-    .hint { font-size: 14px; color: #666; }
-    .status { font-size: 13px; color: #444; margin-top: 6px; min-height: 1.2em; white-space: pre-line; }
-    .diag { font-size: 12px; color: #555; margin-top: 4px; }
+    button:hover:not([disabled]) { background: var(--blue-dark); }
+    .hint { font-size: 14px; color: #666; margin-bottom: 6px; }
+    .status { font-size: 13px; color: #444; margin-top: 8px; min-height: 1.2em; white-space: pre-line; }
+    .diag { font-size: 12px; color: var(--muted); margin-top: 6px; }
     progress { width: 60%; height: 12px; }
-    .ok { color: #137333; }
-    .err { color: #b00020; }
-    .muted { color: #777; }
+    .ok { color: var(--ok); }
+    .err { color: var(--err); }
+    /* File line with clear "×" */
+    .fileline { display:flex; align-items:center; justify-content:center; gap:8px; margin-top:4px; }
+    .filename { font-size: 13px; color:#333; }
+    .clearX { font-size: 18px; line-height: 1; cursor:pointer; color:#999; user-select:none; }
+    .clearX:hover { color:#444; }
+    .spacer { flex: 0 0 8px; }
   </style>
   <!-- QR generator -->
   <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
@@ -35,25 +43,27 @@
 <body>
   <div class="container">
     <h2>Generate Your Jio Creative</h2>
-    <p class="hint">Option A: Upload Excel/CSV for bulk • Option B: Enter one Partner ID</p>
+    <p class="hint">Upload Excel/CSV for bulk (or) enter a single Partner ID. Only one “Generate” button decides automatically.</p>
 
     <!-- Upload mapping -->
     <div class="row">
       <input type="file" id="mappingFile" accept=".xlsx,.xls,.csv" />
-      <button id="removeFileBtn" type="button" disabled>Remove Uploaded File</button>
       <button id="downloadTemplateBtn" type="button">Download CSV Template</button>
     </div>
-    <div id="mapStatus" class="diag muted">No uploaded file yet.</div>
+    <div class="fileline" id="fileLine" style="display:none;">
+      <span class="filename" id="fileNameLabel"></span>
+      <span class="clearX" id="clearUpload" title="Clear uploaded file">×</span>
+    </div>
+    <div id="mapStatus" class="diag">No uploaded file yet.</div>
 
     <!-- Single entry -->
-    <div class="row">
-      <input type="text" id="partnerId" placeholder="Enter Partner ID (single generation)" />
+    <div class="row" style="margin-top:8px;">
+      <input type="text" id="partnerId" placeholder="Enter Partner ID (used if no file or for testing one ID)" />
     </div>
 
-    <!-- Actions -->
+    <!-- Single CTA -->
     <div class="row">
-      <button id="genSingleBtn" disabled>Generate Single</button>
-      <button id="genBulkBtn" disabled>Download Bulk ZIP</button>
+      <button id="genBtn" disabled>Generate</button>
     </div>
 
     <div id="status" class="status">Loading default mapping…</div>
@@ -63,52 +73,56 @@
   </div>
 
   <script>
+    // --- Config ---
     const baseImagePath = "base.jpg";
-    const partnerCsvUrl = "partners.csv";
+    const partnerCsvUrl = "partners.csv"; // optional site map; OK if missing
 
+    // --- State ---
     let SITE_MAP = {};
     let UPLOADED_MAP = {};
     let ACTIVE_MAP = {};
     let uploadedFilename = "";
+    let uploadedIds = []; // preserve uploaded ID order for bulk
 
-    // UI refs
+    // --- UI refs ---
     const mappingFileEl = document.getElementById('mappingFile');
-    const removeFileBtn = document.getElementById('removeFileBtn');
-    const downloadTemplateBtn = document.getElementById('downloadTemplateBtn');
+    const fileLineEl    = document.getElementById('fileLine');
+    const fileNameLabel = document.getElementById('fileNameLabel');
+    const clearUploadEl = document.getElementById('clearUpload');
     const mapStatusEl   = document.getElementById('mapStatus');
     const partnerIdEl   = document.getElementById('partnerId');
-    const genSingleBtn  = document.getElementById('genSingleBtn');
-    const genBulkBtn    = document.getElementById('genBulkBtn');
+    const genBtn        = document.getElementById('genBtn');
     const statusEl      = document.getElementById('status');
     const bulkProgress  = document.getElementById('bulkProgress');
+    const templateBtn   = document.getElementById('downloadTemplateBtn');
 
+    // --- Helpers ---
     const normalizeHeader = (h) => (h || "").toString().replace(/[^a-z0-9]/gi, "").toLowerCase();
     const normalizeId = (id) => (id || "").toString().trim().toUpperCase();
 
     function rebuildActiveMap() {
       ACTIVE_MAP = { ...SITE_MAP, ...UPLOADED_MAP };
       updateMapStatus();
-      updateButtonsState();
+      updateGenerateState();
     }
 
     function updateMapStatus(extra="") {
       const siteCount = Object.keys(SITE_MAP).length;
       const upCount   = Object.keys(UPLOADED_MAP).length;
       const actCount  = Object.keys(ACTIVE_MAP).length;
-      mapStatusEl.textContent =
-        `Active IDs: ${actCount} | Site CSV: ${siteCount} | Uploaded: ${upCount}` +
-        (uploadedFilename ? ` | File: ${uploadedFilename}` : "") +
-        (extra ? `\n${extra}` : "");
+      const base = `Active IDs: ${actCount} | Site CSV: ${siteCount} | Uploaded: ${upCount}`;
+      mapStatusEl.textContent = uploadedFilename ? `${base} | File: ${uploadedFilename}` : base;
+      if (extra) mapStatusEl.textContent += `\n${extra}`;
     }
 
-    function updateButtonsState() {
-      genSingleBtn.disabled = false; // single gen always available
-      genBulkBtn.disabled = Object.keys(UPLOADED_MAP).length === 0; // bulk only if upload present
-      removeFileBtn.disabled = Object.keys(UPLOADED_MAP).length === 0;
-      partnerIdEl.placeholder = Object.keys(UPLOADED_MAP).length
-        ? "Optional (only for single generation)"
-        : "Enter Partner ID (single generation)";
+    function updateGenerateState() {
+      // Enable "Generate" if: (a) uploaded has >=1 ID OR (b) single Partner ID typed
+      const hasUpload = uploadedIds.length > 0;
+      const hasSingle = partnerIdEl.value.trim().length > 0;
+      genBtn.disabled = !(hasUpload || hasSingle);
     }
+
+    partnerIdEl.addEventListener('input', updateGenerateState);
 
     async function loadSiteCsv() {
       try {
@@ -128,28 +142,43 @@
       } catch { return false; }
     }
 
-    // --- Robust CSV/Excel upload (replaces previous upload) ---
+    // --- CSV Template download ---
+    templateBtn.addEventListener('click', () => {
+      const header = "partner_id,store_name\n";
+      const sample = [
+        "12345,Sharma Mobile Store",
+        "778910,Raj Telecom"
+      ].join("\n");
+      const csvContent = header + sample + "\n";
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8" });
+      const stamp = new Date().toISOString().slice(0,10);
+      saveAs(blob, `partner_mapping_template_${stamp}.csv`);
+    });
+
+    // --- File upload (robust CSV/Excel) -> REPLACE uploaded map ---
     mappingFileEl.addEventListener('change', async (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
       uploadedFilename = file.name;
       statusEl.textContent = "Reading uploaded file…";
-      let rows = [];
+      let rows = []; // array of [id, name]
 
       try {
         if (file.name.toLowerCase().endsWith('.csv')) {
           const textRaw = await file.text();
           const text = textRaw.replace(/^\uFEFF/, ''); // strip BOM
-          const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(l => l.trim().length);
+          const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+                            .split('\n').filter(l => l.trim().length);
+
           if (!lines.length) throw new Error("CSV appears empty");
 
-          // detect delimiter , vs ;
+          // Detect delimiter (comma vs semicolon)
           const sample = lines.slice(0, Math.min(lines.length, 3)).join('\n');
           const commaCount = (sample.match(/,/g) || []).length;
           const semiCount  = (sample.match(/;/g) || []).length;
           const delim = semiCount > commaCount ? ';' : ',';
 
-          // basic splitter supporting quotes
+          // Split respecting quotes
           const splitRow = (row) => {
             const out = [];
             let cur = '', inQ = false;
@@ -171,16 +200,4 @@
 
           const dataLines = looksHeadered ? lines.slice(1) : lines;
 
-          for (const row of dataLines) {
-            const cells = splitRow(row);
-            if (cells.length < 2) continue;
-            let idCell, nameCell;
-            if (looksHeadered) {
-              const idxId =
-                headerCells.indexOf('partner_id') !== -1 ? headerCells.indexOf('partner_id') :
-                headerCells.indexOf('partnerid')  !== -1 ? headerCells.indexOf('partnerid')  :
-                headerCells.indexOf('id');
-              const idxName =
-                headerCells.indexOf('store_name') !== -1 ? headerCells.indexOf('store_name') :
-                headerCells.indexOf('storename')  !== -1 ? headerCells.indexOf('storename')  :
-                headerCells.indexOf('store');
+          for (const row of data
